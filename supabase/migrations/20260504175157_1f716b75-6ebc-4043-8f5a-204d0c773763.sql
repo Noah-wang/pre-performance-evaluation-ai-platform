@@ -1,0 +1,1 @@
+REVOKE EXECUTE ON FUNCTION public.log_audit_event() FROM anon, authenticated, public;

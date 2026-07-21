@@ -1,0 +1,34 @@
+project_id = "ezntldqixkphcqlnepyq"
+
+[functions.generate-report]
+verify_jwt = false
+
+[functions.generate-rectification]
+verify_jwt = false
+
+[functions.analyze-meeting]
+verify_jwt = false
+
+[functions.transcribe-audio]
+verify_jwt = false
+
+[functions.generate-evaluation-plan]
+verify_jwt = false
+
+[functions.check-task-deadlines]
+verify_jwt = false
+
+[functions.generate-expert-notice]
+verify_jwt = false
+
+[functions.match-materials]
+verify_jwt = false
+
+[functions.ingest-knowledge-file]
+verify_jwt = false
+
+[functions.ingest-project-knowledge]
+verify_jwt = false
+
+[functions.search-knowledge]
+verify_jwt = false

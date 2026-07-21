@@ -1,0 +1,1 @@
+DELETE FROM public.field_photos WHERE file_path = 'test/site-photo-1.jpg';
