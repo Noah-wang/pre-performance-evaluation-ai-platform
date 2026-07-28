@@ -1647,6 +1647,106 @@ const Reports = () => {
                   <TabsTrigger value="actions" className="px-2 text-xs">工具</TabsTrigger>
                 </TabsList>
 
+                {/*
+                  核验结果放在标签页之外：里面的口径确认需要使用者拍板，
+                  藏在某个标签页里会让人看不到，也就无从确认。
+                */}
+              {reportVerification && (
+                <div className={`rounded-md border px-3 py-2 text-xs ${
+                  reportVerification.status === "passed"
+                    ? "border-success/30 bg-success/5"
+                    : reportVerification.status === "blocked"
+                    ? "border-destructive/30 bg-destructive/5"
+                    : "border-accent/30 bg-accent/5"
+                }`}>
+                  <div className="flex items-center gap-2 font-medium">
+                    {reportVerification.status === "passed"
+                      ? <CheckCircle2 className="h-4 w-4 text-success" />
+                      : <AlertTriangle className={`h-4 w-4 ${
+                        reportVerification.status === "blocked" ? "text-destructive" : "text-accent"
+                      }`} />}
+                    全面核验：{reportVerification.status === "passed"
+                      ? "通过"
+                      : reportVerification.status === "blocked"
+                      ? "已阻止"
+                      : "需人工确认"}
+                  </div>
+                  <p className="mt-1 text-muted-foreground">{reportVerification.summary}</p>
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+                    <span>资料 {reportVerification.checkedFiles}/{reportVerification.totalFiles}</span>
+                    <span>指标 {reportVerification.dimensionsCovered}/{reportVerification.dimensionsChecked}</span>
+                    {reportVerification.phase === "final" && reportVerification.targetFactsChecked > 0 && (
+                      <span>目标值 {reportVerification.targetFactsPresent}/{reportVerification.targetFactsChecked}</span>
+                    )}
+                  </div>
+                  {(reportVerification.files ?? []).some((file) => file.status === "unreadable") && (
+                    <div className="mt-2 rounded border border-destructive/20 bg-background/70 px-2 py-1.5">
+                      <div className="font-medium text-destructive">未完成解析资料</div>
+                      <div className="mt-1 space-y-1 text-muted-foreground">
+                        {(reportVerification.files ?? [])
+                          .filter((file) => file.status === "unreadable")
+                          .slice(0, 6)
+                          .map((file) => (
+                            <p key={file.fileId} className="leading-relaxed">
+                              {file.fileName}
+                              {file.errorMessage ? `（${file.errorMessage}）` : ""}
+                            </p>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  {reportVerification.issues.length > 0 && (
+                    <div className="mt-2 space-y-2">
+                      {reportVerification.issues.slice(0, 6).map((issue) => (
+                        <div key={`${issue.code}:${issue.detail}`} className="leading-relaxed">
+                          <p>
+                            <span className="font-medium">{issue.title}：</span>{issue.detail}
+                            {issue.sourceNames?.length ? (
+                              <span className="block text-muted-foreground">
+                                涉及资料：{issue.sourceNames.slice(0, 6).join("、")}
+                              </span>
+                            ) : null}
+                          </p>
+                          {issue.question && issue.options?.length ? (
+                            <div className="mt-1.5 rounded border border-accent/30 bg-background/70 p-2">
+                              <p className="font-medium text-foreground">{issue.question}</p>
+                              <div className="mt-1.5 space-y-1">
+                                {issue.options.map((option) => (
+                                  <label
+                                    key={option}
+                                    className="flex cursor-pointer items-start gap-2 text-muted-foreground hover:text-foreground"
+                                  >
+                                    <input
+                                      type="radio"
+                                      className="mt-0.5"
+                                      name={`issue-${issue.code}`}
+                                      checked={issueAnswers[issue.code] === option}
+                                      onChange={() =>
+                                        setIssueAnswers((prev) => ({ ...prev, [issue.code]: option }))}
+                                    />
+                                    <span>{option}</span>
+                                  </label>
+                                ))}
+                              </div>
+                              {issueAnswers[issue.code] && (
+                                <p className="mt-1.5 text-[11px] text-success">
+                                  已确认，下次生成将按此口径撰写
+                                </p>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                      {reportVerification.issues.some((issue) => issue.options?.length) && (
+                        <p className="text-[11px] text-muted-foreground">
+                          选定口径后重新生成报告即可生效；未选择时模型不会自行统一版本，会按各份资料分别表述。
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
                 <TabsContent value="basic" className="mt-4 space-y-5">
             <div>
               <div className="section-eyebrow mb-3">① TARGET · 评估对象</div>
@@ -1836,101 +1936,6 @@ const Reports = () => {
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 确认封面信息、结论口径后生成报告；生成后可在右侧正文继续编辑。扫描件需要 OCR，首次解析会慢一些。
               </p>
-              {reportVerification && (
-                <div className={`rounded-md border px-3 py-2 text-xs ${
-                  reportVerification.status === "passed"
-                    ? "border-success/30 bg-success/5"
-                    : reportVerification.status === "blocked"
-                    ? "border-destructive/30 bg-destructive/5"
-                    : "border-accent/30 bg-accent/5"
-                }`}>
-                  <div className="flex items-center gap-2 font-medium">
-                    {reportVerification.status === "passed"
-                      ? <CheckCircle2 className="h-4 w-4 text-success" />
-                      : <AlertTriangle className={`h-4 w-4 ${
-                        reportVerification.status === "blocked" ? "text-destructive" : "text-accent"
-                      }`} />}
-                    全面核验：{reportVerification.status === "passed"
-                      ? "通过"
-                      : reportVerification.status === "blocked"
-                      ? "已阻止"
-                      : "需人工确认"}
-                  </div>
-                  <p className="mt-1 text-muted-foreground">{reportVerification.summary}</p>
-                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
-                    <span>资料 {reportVerification.checkedFiles}/{reportVerification.totalFiles}</span>
-                    <span>指标 {reportVerification.dimensionsCovered}/{reportVerification.dimensionsChecked}</span>
-                    {reportVerification.phase === "final" && reportVerification.targetFactsChecked > 0 && (
-                      <span>目标值 {reportVerification.targetFactsPresent}/{reportVerification.targetFactsChecked}</span>
-                    )}
-                  </div>
-                  {(reportVerification.files ?? []).some((file) => file.status === "unreadable") && (
-                    <div className="mt-2 rounded border border-destructive/20 bg-background/70 px-2 py-1.5">
-                      <div className="font-medium text-destructive">未完成解析资料</div>
-                      <div className="mt-1 space-y-1 text-muted-foreground">
-                        {(reportVerification.files ?? [])
-                          .filter((file) => file.status === "unreadable")
-                          .slice(0, 6)
-                          .map((file) => (
-                            <p key={file.fileId} className="leading-relaxed">
-                              {file.fileName}
-                              {file.errorMessage ? `（${file.errorMessage}）` : ""}
-                            </p>
-                          ))}
-                      </div>
-                    </div>
-                  )}
-                  {reportVerification.issues.length > 0 && (
-                    <div className="mt-2 space-y-2">
-                      {reportVerification.issues.slice(0, 6).map((issue) => (
-                        <div key={`${issue.code}:${issue.detail}`} className="leading-relaxed">
-                          <p>
-                            <span className="font-medium">{issue.title}：</span>{issue.detail}
-                            {issue.sourceNames?.length ? (
-                              <span className="block text-muted-foreground">
-                                涉及资料：{issue.sourceNames.slice(0, 6).join("、")}
-                              </span>
-                            ) : null}
-                          </p>
-                          {issue.question && issue.options?.length ? (
-                            <div className="mt-1.5 rounded border border-accent/30 bg-background/70 p-2">
-                              <p className="font-medium text-foreground">{issue.question}</p>
-                              <div className="mt-1.5 space-y-1">
-                                {issue.options.map((option) => (
-                                  <label
-                                    key={option}
-                                    className="flex cursor-pointer items-start gap-2 text-muted-foreground hover:text-foreground"
-                                  >
-                                    <input
-                                      type="radio"
-                                      className="mt-0.5"
-                                      name={`issue-${issue.code}`}
-                                      checked={issueAnswers[issue.code] === option}
-                                      onChange={() =>
-                                        setIssueAnswers((prev) => ({ ...prev, [issue.code]: option }))}
-                                    />
-                                    <span>{option}</span>
-                                  </label>
-                                ))}
-                              </div>
-                              {issueAnswers[issue.code] && (
-                                <p className="mt-1.5 text-[11px] text-success">
-                                  已确认，下次生成将按此口径撰写
-                                </p>
-                              )}
-                            </div>
-                          ) : null}
-                        </div>
-                      ))}
-                      {reportVerification.issues.some((issue) => issue.options?.length) && (
-                        <p className="text-[11px] text-muted-foreground">
-                          选定口径后重新生成报告即可生效；未选择时模型不会自行统一版本，会按各份资料分别表述。
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
                 </TabsContent>
 
