@@ -18,6 +18,14 @@ import {
   Maximize2, Minimize2, RefreshCw, Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
+import type { ReportGenerationStage } from "@/lib/reportGenerationState";
+import {
+  finishReportGeneration,
+  getReportGeneration,
+  startReportGeneration,
+  subscribeReportGeneration,
+  updateReportGeneration,
+} from "@/lib/reportGenerationState";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { StatusPill, EmptyState, SectionHeader } from "@/components/ui-kit";
@@ -207,13 +215,6 @@ const getLocalDateInput = (date = new Date()) => {
 
 type ReportTemplateSection = ReturnType<typeof buildReportTemplateSections>[number];
 
-interface GenerationStage {
-  label: string;
-  current?: number;
-  total?: number;
-  detail?: string;
-}
-
 const WRITING_STAGES: Array<{ heading: string; label: string }> = [
   { heading: "四、相关建议", label: "正在撰写：四至六章（建议与附件）" },
   { heading: "三、评估内容与结论", label: "正在撰写：第三章（评估内容与结论）" },
@@ -363,7 +364,7 @@ const Reports = () => {
   const [supportedBudgetWan, setSupportedBudgetWan] = useState(cachedWorkspace?.supportedBudgetWan ?? "");
   const [summaryRemark, setSummaryRemark] = useState(cachedWorkspace?.summaryRemark ?? "");
   const [generating, setGenerating] = useState(false);
-  const [generationStage, setGenerationStage] = useState<GenerationStage | null>(null);
+  const [generationStage, setGenerationStage] = useState<ReportGenerationStage | null>(null);
   const [editorToolbarSlot, setEditorToolbarSlot] = useState<HTMLDivElement | null>(null);
   const [saving, setSaving] = useState(false);
   const [rects, setRects] = useState<Rectification[]>(cachedWorkspace?.rects ?? []);
@@ -890,6 +891,18 @@ const Reports = () => {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // 生成过程可能横跨页面切换：组件卸载时那个 async 流程仍在跑，这里重新挂载后
+  // 直接接回它的输出，而不是显示成空白。
+  useEffect(() => {
+    const apply = (value: ReturnType<typeof getReportGeneration>) => {
+      setGenerating(value.active);
+      setGenerationStage(value.stage);
+      if (value.active && value.content) setContent(value.content);
+    };
+    apply(getReportGeneration());
+    return subscribeReportGeneration(apply);
+  }, []);
+
   const snapshotCurrentProofingState = (): ProofingSnapshot => ({
     content,
     supervisingDepartment,
@@ -1015,6 +1028,7 @@ const Reports = () => {
    */
   const repairUnindexedMaterials = async (projectId: string) => {
     setGenerationStage({ label: "检查资料解析状态" });
+        updateReportGeneration({ stage: { label: "检查资料解析状态" } });
     const [materialRes, indexRes] = await Promise.all([
       supabase
         .from("materials")
@@ -1052,6 +1066,12 @@ const Reports = () => {
         total: pending.length,
         detail: fileName,
       });
+        updateReportGeneration({ stage: {
+        label: "正在解析资料",
+        current: index + 1,
+        total: pending.length,
+        detail: fileName,
+      } });
       try {
         const { error } = await supabase.functions.invoke("ingest-project-knowledge", {
           body: { materialId: material.id, force: true, limit: 1 },
@@ -1091,6 +1111,12 @@ const Reports = () => {
         total: targets.length,
         detail: file.fileName,
       });
+        updateReportGeneration({ stage: {
+        label: "正在重新解析未通过核验的资料",
+        current: index + 1,
+        total: targets.length,
+        detail: file.fileName,
+      } });
       try {
         const { error } = await supabase.functions.invoke("ingest-project-knowledge", {
           body: { materialId: file.sourceId, force: true, limit: 1 },
@@ -1108,8 +1134,14 @@ const Reports = () => {
 
   const generate = async () => {
     if (!project) return toast.error("请先选择评估对象");
+    // 生成横跨页面切换时仍在后台进行，重复触发会同时跑两份、互相覆盖正文。
+    if (getReportGeneration().active) {
+      return toast.info("报告正在生成中，请等待当前任务完成");
+    }
     setGenerating(true);
+    startReportGeneration(project.id ?? null);
     setGenerationStage({ label: "准备生成" });
+    updateReportGeneration({ stage: { label: "准备生成" } });
     clearProofingState();
     setReportEvidenceCards([]);
     setReportVerification(null);
@@ -1141,6 +1173,7 @@ const Reports = () => {
       if (project.id) await repairUnindexedMaterials(project.id);
 
       setGenerationStage({ label: "正在核验资料并检索证据" });
+        updateReportGeneration({ stage: { label: "正在核验资料并检索证据" } });
       const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-report`;
       const requestReport = () => fetch(url, {
         method: "POST",
@@ -1170,6 +1203,7 @@ const Reports = () => {
         const repairedNow = await repairBlockedMaterials(failed?.verification);
         if (repairedNow) {
           setGenerationStage({ label: "资料已重新解析，正在重新生成" });
+        updateReportGeneration({ stage: { label: "资料已重新解析，正在重新生成" } });
           res = await requestReport();
         }
         if (!res.ok || !res.body) {
@@ -1232,6 +1266,10 @@ const Reports = () => {
                     label: "正在撰写报告",
                     detail: `资料核验通过 ${verification.checkedFiles}/${verification.totalFiles}`,
                   });
+        updateReportGeneration({ stage: {
+                    label: "正在撰写报告",
+                    detail: `资料核验通过 ${verification.checkedFiles}/${verification.totalFiles}`,
+                  } });
                 }
                 continue;
               }
@@ -1244,10 +1282,12 @@ const Reports = () => {
               if (c) {
                 acc += c;
                 setContent(acc);
-                setGenerationStage({
+                const stage = {
                   label: writingStageLabel(acc),
                   detail: `已生成 ${acc.length} 字`,
-                });
+                };
+                setGenerationStage(stage);
+                updateReportGeneration({ content: acc, stage });
               }
             } catch {
               buf = line + "\n" + buf;
@@ -1300,6 +1340,7 @@ const Reports = () => {
     } finally {
       setGenerating(false);
       setGenerationStage(null);
+      finishReportGeneration();
     }
   };
 
