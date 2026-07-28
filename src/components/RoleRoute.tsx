@@ -12,7 +12,8 @@ interface RoleRouteProps {
 export const RoleRoute = ({ mode, children }: RoleRouteProps) => {
   const { user, loading, isAdmin, roles } = useAuth();
 
-  if (loading) {
+  // 同 ProtectedRoute：已登录后的角色刷新不应卸载当前页面。
+  if (loading && !user) {
     return (
       <div className="min-h-screen grid place-items-center bg-background">
         <div className="font-serif text-vermillion text-lg">载入中…</div>
