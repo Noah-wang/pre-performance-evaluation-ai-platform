@@ -1275,6 +1275,20 @@ const Reports = () => {
             : "")
         : "";
 
+      // 结论汇总口径与备注同样是人做的决定，必须进入生成：金额直接决定第三章
+      // 结论怎么写、第四章建议提什么，之前它们只在导出时才被用到。
+      const summaryInstruction = [
+        budgetSummary.unsupportedWan !== null || budgetSummary.supportedWan !== null
+          ? `【结论汇总口径，必须与结论一致】不予支持部分预算 ${
+            budgetSummary.unsupportedWan?.toFixed(2) ?? "待补充"
+          } 万元；支持金额 ${budgetSummary.supportedWan?.toFixed(2) ?? "待补充"} 万元。`
+            + "第三章总体结论须体现该划分；不得写出与之冲突的金额。"
+          : "",
+        summaryRemark.trim()
+          ? `【评估机构补充说明，须在第五章“其他需要说明的问题”如实反映】${summaryRemark.trim()}`
+          : "",
+      ].filter(Boolean).join("\n");
+
       const confirmedWordings = Object.entries(issueAnswersRef.current).filter(([, value]) => value);
       const confirmedWordingInstruction = confirmedWordings.length
         ? `【已人工确认的口径，必须严格遵守】\n${
@@ -1300,6 +1314,7 @@ const Reports = () => {
             generationIndicatorInstruction,
             economicAnalysis,
             conclusionInstruction,
+            summaryInstruction,
             confirmedWordingInstruction,
             extra.trim(),
           ].filter(Boolean).join("\n\n"),
