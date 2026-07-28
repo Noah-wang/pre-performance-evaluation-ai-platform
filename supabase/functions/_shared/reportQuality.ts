@@ -280,7 +280,39 @@ export const removeUnsupportedPolicyClauses = (
     .join("\n");
 };
 
-export const cleanReportLanguage = (report: string) =>
+export 
+/**
+ * 删除句尾复读的片段。
+ *
+ * 模型常在写完一句后又把其中某个短语重复一遍："调阅响应≤24 小时。24 小时。"
+ * "符合九防要求。九防要求。"。按具体形态（数字+单位、纯中文…）逐条写规则必然
+ * 有缝——换个项目、换种搭配就漏。这里只依据一个与内容无关的事实判断：句子末尾
+ * 的这一小段，是否在同一句前文里已经出现过。
+ */
+const removeEchoedTails = (value: string) =>
+  String(value ?? "")
+    .split("\n")
+    .map((line) => {
+      let out = line;
+      for (let pass = 0; pass < 3; pass += 1) {
+        const next = out.replace(
+          /([^。；！？\n]{4,})([。；])\s*([^。；！？\n]{2,24})([。；])/g,
+          (full, head, mark, tail) => {
+            const flat = (text: string) => String(text).replace(/[\s，,、]/g, "");
+            const tailKey = flat(tail);
+            // 片段太短容易误伤（"其中。"），太长多半是独立的句子
+            if (tailKey.length < 2 || tailKey.length > 24) return full;
+            return flat(head).includes(tailKey) ? `${head}${mark}` : full;
+          },
+        );
+        if (next === out) break;
+        out = next;
+      }
+      return out;
+    })
+    .join("\n");
+
+const cleanReportLanguage = (report: string) =>
   String(report ?? "")
     .replace(/(标箱|非标箱|万元|元|次|项|件|份|人|户)\1/g, "$1")
     .replace(/([^。\n]{8,160}[。])\s*\1/g, "$1")
@@ -299,16 +331,7 @@ export const cleanReportLanguage = (report: string) =>
     )
     .replace(/[；;]\s*[、，,]/g, "；")
     .replace(/([\u4e00-\u9fa5]{2,8})。\1。/g, "$1。")
-    // 句尾常拖出一个上文片段的复读，例如"调阅响应≤24 小时。24 小时。"。
-    // 上面那条只认纯中文，带数字、单位或空格的片段（24 小时、90.2 万元）漏网。
-    // 这里要求该片段确实在前文出现过才删，避免误伤正常的短句重复。
-    .replace(
-      /([^。；\n]{2,20})([。；])\s*([\d.]+\s*[\u4e00-\u9fa5%]{1,6})[。；]/g,
-      (full, head, mark, tail) =>
-        String(head).replace(/\s+/g, "").includes(String(tail).replace(/\s+/g, ""))
-          ? `${head}${mark}`
-          : full,
-    )
+    .replace(/^[\s\S]*$/, removeEchoedTails)
     .replace(/[；;]\s*[。．]/g, "。")
     .replace(/[。．]{2,}/g, "。")
     .replace(/[；;]{2,}/g, "；")

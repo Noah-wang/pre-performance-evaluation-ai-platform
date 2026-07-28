@@ -189,6 +189,18 @@ describe("report quality corrections", () => {
     expect(containsCorruptedReportText(line)).toBe(true);
   });
 
+  it("删除句尾复读片段，不限定内容形态", () => {
+    const cases = [
+      ["库房建设符合九防要求。九防要求。", "九防要求"],
+      ["年服务群众达12.5万人次。12.5万人次。", "12.5万人次"],
+      ["累计更新监控设备320台套。320台套。", "320台套"],
+    ] as const;
+    for (const [input, fragment] of cases) {
+      const result = applyReportQualityCorrections(input, "");
+      expect(result.split(fragment).length - 1).toBe(1);
+    }
+  });
+
   it("删除句尾复读的数值片段", () => {
     const result = applyReportQualityCorrections(
       "（4）服务质量监管：确保档案完好率100%、调阅响应≤24 小时。24 小时。",
