@@ -157,6 +157,27 @@ const rectsToMarkdown = (list: Rectification[]) => {
   }).join("\n\n");
 };
 
+
+/**
+ * 正文里表达的结论与选定的评估结论是否矛盾。
+ *
+ * 结论可能在生成之后才改，也可能模型没遵守指令。两种情况都会产出"结论栏写
+ * 不予支持、正文写建议予以安排预算"这种自相矛盾的报告，签发出去是事故。
+ */
+const conclusionMismatch = (content: string, conclusion: string) => {
+  if (!content || !conclusion) return "";
+  const text = content.replace(/<[^>]+>/g, "");
+  const positive = /评估结果为[""]?通过|建议予以安排预算|同意安排预算|予以支持/.test(text);
+  const negative = /评估结果为[""]?不通过|建议不予安排预算|不予支持/.test(text);
+  if (conclusion === "不予支持" && positive && !negative) {
+    return "正文写的是“通过 / 建议予以安排预算”，与结论“不予支持”矛盾";
+  }
+  if (conclusion === "予以支持" && negative && !positive) {
+    return "正文写的是“不通过 / 不予安排预算”，与结论“予以支持”矛盾";
+  }
+  return "";
+};
+
 const CONCLUSIONS = ["予以支持", "部分支持", "不予支持"];
 const REPORT_WORKSPACE_CACHE_KEY = "reports:workspace-state:v1";
 const PRIORITY_META: Record<string, { label: string; tone: "danger" | "warning" | "neutral" }> = {
@@ -794,7 +815,10 @@ const Reports = () => {
   const isCurrentFinalized = currentReport?.status === "finalized";
   // 终稿核验发现"查无出处的数字/引用"时拦住定稿——正文可以继续编辑，
   // 但不允许把未经核实的内容定为终稿。
-  const finalizeBlockedReason = reportVerification?.phase === "final"
+  const conclusionConflict = conclusionMismatch(content, conclusion);
+  const finalizeBlockedReason = conclusionConflict
+    ? conclusionConflict
+    : reportVerification?.phase === "final"
       && reportVerification.status === "blocked"
     ? reportVerification.issues.find((issue) => issue.severity === "error")?.title
       ?? "终稿核验未通过"
@@ -1238,6 +1262,19 @@ const Reports = () => {
       const generationIndicatorInstruction = buildReportIndicatorInstruction(generationIndicators);
 
       // 使用者对口径冲突的选择要写进生成指令，否则模型只能自己挑一个版本。
+      // 评估结论是人做的判断，不能让模型按专家评分自行推断——之前选了"不予支持"，
+      // 报告却写成"评估结果为通过，建议予以安排预算"，正文与结论互相矛盾。
+      const conclusionInstruction = conclusion
+        ? `【本项目评估结论已由评估机构确定：${conclusion}】\n`
+          + `第三章总体结论和全文结语必须与该结论一致，不得依据专家得分自行判定为其他结果；`
+          + `不得出现与之相反的"建议予以安排预算/不予安排预算"表述。`
+          + (conclusion === "不予支持"
+            ? "应说明不予支持的具体理由和需要补正的事项。"
+            : conclusion === "部分支持"
+            ? "应说明支持部分与不予支持部分的划分依据。"
+            : "")
+        : "";
+
       const confirmedWordings = Object.entries(issueAnswersRef.current).filter(([, value]) => value);
       const confirmedWordingInstruction = confirmedWordings.length
         ? `【已人工确认的口径，必须严格遵守】\n${
@@ -1262,6 +1299,7 @@ const Reports = () => {
             generationStrictInstruction,
             generationIndicatorInstruction,
             economicAnalysis,
+            conclusionInstruction,
             confirmedWordingInstruction,
             extra.trim(),
           ].filter(Boolean).join("\n\n"),
@@ -1948,6 +1986,11 @@ const Reports = () => {
                   {CONCLUSIONS.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
                 </SelectContent>
               </Select>
+              {conclusionConflict && (
+                <p className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-[11px] leading-relaxed text-destructive">
+                  {conclusionConflict}。请修改正文，或重新生成报告使其与结论一致——未处理前无法定稿。
+                </p>
+              )}
             </div>
                 </TabsContent>
 
