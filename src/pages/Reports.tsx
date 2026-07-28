@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { ReportGenerationStage } from "@/lib/reportGenerationState";
+import type { ReportVerificationIssue } from "@/lib/reportVerification";
 import {
   finishReportGeneration,
   getReportGeneration,
@@ -368,6 +369,9 @@ const Reports = () => {
   const [generationStage, setGenerationStage] = useState<ReportGenerationStage | null>(null);
   const [editorToolbarSlot, setEditorToolbarSlot] = useState<HTMLDivElement | null>(null);
   const [issueAnswers, setIssueAnswers] = useState<Record<string, string>>({});
+  const [wordingDialogOpen, setWordingDialogOpen] = useState(false);
+  const [pendingWordingIssues, setPendingWordingIssues] = useState<ReportVerificationIssue[]>([]);
+  const [wordingDraft, setWordingDraft] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [rects, setRects] = useState<Rectification[]>(cachedWorkspace?.rects ?? []);
   const [generatingRect, setGeneratingRect] = useState(false);
@@ -1139,6 +1143,25 @@ const Reports = () => {
     return true;
   };
 
+  /** 批量保存口径：弹窗里一次确认多项。 */
+  const saveWordingDecisions = async (next: Record<string, string>) => {
+    setIssueAnswers(next);
+    if (!project?.id) return true;
+    const { error } = await (supabase as any)
+      .from("projects")
+      .update({ wording_decisions: next })
+      .eq("id", project.id);
+    if (error) {
+      toast.error(`口径未能保存：${error.message}`);
+      return false;
+    }
+    setProjects((prev) => prev.map((item) =>
+      item.id === project.id ? { ...item, wording_decisions: next } : item
+    ));
+    toast.success("口径已确认并保存到本项目");
+    return true;
+  };
+
   /** 确认口径并写回项目：这是项目级决定，不该只活在当前页面里。 */
   const confirmWording = async (code: string, option: string) => {
     const next = { ...issueAnswers, [code]: option };
@@ -1267,6 +1290,7 @@ const Reports = () => {
       let buf = "";
       let done = false;
       let sawDoneSignal = false;
+      let blockedByWording = false;
       let acc = "";
       let streamError: Error | null = null;
       try {
@@ -1297,6 +1321,20 @@ const Reports = () => {
                 const verification = p.verification as ComprehensiveReportVerification;
                 setReportVerification(verification);
                 if (verification.phase === "preflight") {
+                  // 口径没定就往下写，模型只能自己挑一个版本，写完再改代价很大。
+                  // 核验是流的第一个事件，此时还没发生任何 AI 调用，在这里拦住
+                  // 不浪费任何生成开销。
+                  const unanswered = (verification.issues ?? []).filter(
+                    (issue) => issue.options?.length && !issueAnswers[issue.code],
+                  );
+                  if (unanswered.length) {
+                    setPendingWordingIssues(unanswered);
+                    setWordingDraft({ ...issueAnswers });
+                    setWordingDialogOpen(true);
+                    blockedByWording = true;
+                    done = true;
+                    break;
+                  }
                   setGenerationStage({
                     label: "正在撰写报告",
                     detail: `资料核验通过 ${verification.checkedFiles}/${verification.totalFiles}`,
@@ -1332,6 +1370,10 @@ const Reports = () => {
         }
       } catch (error) {
         streamError = error instanceof Error ? error : new Error("网络连接中断");
+      }
+      if (blockedByWording) {
+        toast.info("请先确认资料口径，确认后将自动开始撰写");
+        return;
       }
       if (!acc.trim()) throw streamError ?? new Error("AI 未返回报告内容");
       if (streamError) throw streamError;
@@ -1661,7 +1703,56 @@ const Reports = () => {
 
         <EditPermissionNotice />
 
-        <div className="grid min-w-0 grid-cols-1 items-start gap-6 xl:grid-cols-[360px_minmax(0,1fr)] 2xl:grid-cols-[400px_minmax(0,1fr)]">
+        <Dialog open={wordingDialogOpen} onOpenChange={setWordingDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>请先确认资料口径</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            <p className="text-muted-foreground">
+              以下内容在资料中存在多种说法。确认后报告将严格按你选定的口径撰写，
+              确认结果保存在本项目，之后不需要重复选择。
+            </p>
+            {pendingWordingIssues.map((issue) => (
+              <div key={issue.code} className="rounded-lg border border-border p-3">
+                <p className="font-medium text-foreground">{issue.question}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{issue.detail}</p>
+                <div className="mt-2 space-y-1.5">
+                  {(issue.options ?? []).map((option) => (
+                    <label key={option} className="flex cursor-pointer items-start gap-2">
+                      <input
+                        type="radio"
+                        className="mt-0.5"
+                        name={`dialog-${issue.code}`}
+                        checked={wordingDraft[issue.code] === option}
+                        onChange={() => setWordingDraft((prev) => ({ ...prev, [issue.code]: option }))}
+                      />
+                      <span>{option}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setWordingDialogOpen(false)}>稍后再说</Button>
+            <Button
+              variant="hero"
+              disabled={pendingWordingIssues.some((issue) => !wordingDraft[issue.code])}
+              onClick={async () => {
+                const saved = await saveWordingDecisions(wordingDraft);
+                if (!saved) return;
+                setWordingDialogOpen(false);
+                void generate();
+              }}
+            >
+              确认口径并开始撰写
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <div className="grid min-w-0 grid-cols-1 items-start gap-6 xl:grid-cols-[360px_minmax(0,1fr)] 2xl:grid-cols-[400px_minmax(0,1fr)]">
         {/* 左侧：控制台 */}
           <Card className="surface-card min-w-0">
             <CardContent className="p-5">
