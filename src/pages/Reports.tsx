@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { PageHeader } from "@/components/PageHeader";
@@ -14,6 +15,7 @@ import {
 import {
   Sparkles, Save, FileText, Archive as ArchiveIcon,
   AlertTriangle, Lightbulb, History, CheckCircle2, ListTodo, Share2, Wand2, Stamp, Trash2,
+  Maximize2, Minimize2, RefreshCw, Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -30,10 +32,29 @@ import { exportEvaluationReport } from "@/lib/docxExport";
 import { withReportWriteFallback } from "@/lib/reportSchemaCompat";
 import { extractReportTocEntries } from "@/lib/reportToc";
 import {
+  applyReportCitations,
+  buildLocalReportCitations,
+  buildLocalReportEvidenceCards,
+  hasReportCitations,
+  stripReportCitations,
+  type ReportEvidenceCard,
+} from "@/lib/reportCitations";
+import {
   reportDocumentPageClasses,
   reportDocumentPageInnerClasses,
 } from "@/lib/documentStyles";
+import {
+  DEFAULT_REPORT_DIMENSIONS,
+  buildReportTemplateSections,
+  buildStrictReportInstruction,
+  stripDeprecatedReportMethodSections,
+} from "../../supabase/functions/_shared/reportTemplate";
+import {
+  checkReportCompleteness,
+  normalizeReportFormalTail,
+} from "@/lib/reportCompleteness";
 import { useConfirm } from "@/hooks/useConfirm";
+import type { ComprehensiveReportVerification } from "@/lib/reportVerification";
 
 interface Project {
   id: string;
@@ -130,17 +151,6 @@ const PRIORITY_META: Record<string, { label: string; tone: "danger" | "warning" 
   medium: { label: "中优先", tone: "warning" },
   low: { label: "低优先", tone: "neutral" },
 };
-const DEFAULT_REPORT_DIMENSIONS = ["项目必要性", "项目可行性", "项目经济性", "项目效率性", "项目效益性"];
-const CN_SECTION_LABELS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
-const buildEvaluationContentSkeleton = (dimensions = DEFAULT_REPORT_DIMENSIONS) =>
-  `三、评估内容与结论\n${dimensions
-    .map((name, index) => `（${CN_SECTION_LABELS[index] ?? String(index + 1)}）${name}`)
-    .join("\n")}\n（${CN_SECTION_LABELS[dimensions.length] ?? String(dimensions.length + 1)}）总体结论\n`;
-const buildEvaluationContentPatterns = (dimensions = DEFAULT_REPORT_DIMENSIONS) => [
-  /三、评估内容与结论/,
-  ...dimensions.map((name) => new RegExp(`（[一二三四五六七八九十]+）\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)),
-  /总体结论/,
-];
 const readReportsWorkspaceCache = (): Partial<ReportsWorkspaceCache> | null => {
   if (typeof window === "undefined") return null;
   try {
@@ -152,180 +162,9 @@ const readReportsWorkspaceCache = (): Partial<ReportsWorkspaceCache> | null => {
     return null;
   }
 };
-const REPORT_TEMPLATE_SECTIONS = [
-  {
-    id: "evaluation_target",
-    label: "一、评估对象",
-    patterns: [
-      /一、评估对象/,
-      /（一）项目绩效目标/,
-      /1\.总体目标/,
-      /2\.具体绩效指标/,
-      /（1）产出数量指标/,
-      /（2）产出质量指标/,
-      /（3）产出进度指标/,
-      /（4）产出成本指标/,
-      /（5）经济效益/,
-      /（6）社会效益指标/,
-      /（7）环境效益指标/,
-      /（8）可持续影响指标/,
-      /（9）服务对象满意度指标/,
-      /（二）项目资金总额/,
-      /（三）项目概况/,
-      /1\.项目背景/,
-      /2\.项目主要内容/,
-    ],
-    skeleton: `一、评估对象
-项目名称：
-项目单位：
-主管部门：
-项目属性：
-（一）项目绩效目标
-1.总体目标
-2.具体绩效指标
-（1）产出数量指标
-（2）产出质量指标
-（3）产出进度指标
-（4）产出成本指标
-（5）经济效益
-（6）社会效益指标
-（7）环境效益指标
-（8）可持续影响指标
-（9）服务对象满意度指标
-（二）项目资金总额
-（三）项目概况
-1.项目背景
-2.项目主要内容
-`,
-    hint: "必须包含项目基本字段、绩效目标九类指标、资金总额、项目背景和主要内容。",
-  },
-  {
-    id: "method",
-    label: "二、评估方式和方法",
-    patterns: [
-      /二、评估方式和方法/,
-      /（一）评估程序/,
-      /（二）评估思路及方法/,
-      /（三）评估方式/,
-      /1\.项目基本情况现场调研/,
-      /2\.查阅资料/,
-      /3\.咨询专家/,
-      /4\.召开专家预评估会/,
-      /5\.召开正式专家会/,
-    ],
-    skeleton: `二、评估方式和方法
-（一）评估程序
-（二）评估思路及方法
-（三）评估方式
-1.项目基本情况现场调研
-2.查阅资料
-3.咨询专家
-4.召开专家预评估会
-5.召开正式专家会
-`,
-    hint: "必须依次说明评估程序、评估思路及方法，以及现场调研、资料查阅、专家咨询和两次会议。",
-  },
-  {
-    id: "evaluation_content",
-    label: "三、评估内容与结论",
-    patterns: buildEvaluationContentPatterns(),
-    skeleton: buildEvaluationContentSkeleton(),
-    hint: "必须按当前项目关联的评估指标体系展开，并形成总体结论。",
-  },
-  {
-    id: "suggestions",
-    label: "四、相关建议",
-    patterns: [/四、相关建议/],
-    skeleton: `四、相关建议
-1.针对政策依据和立项决策提出建议。
-2.针对实施方案和管理制度提出建议。
-3.针对预算测算、成本控制和资金监管提出建议。
-4.针对绩效目标和指标体系提出建议。
-`,
-    hint: "建议必须与第三章发现的问题逐项对应，明确责任、补充资料或整改方向。",
-  },
-  {
-    id: "notes",
-    label: "五、其他需要说明的问题",
-    patterns: [
-      /五、其他需要说明的问题/,
-      /本报告是评估机构根据/,
-      /本报告仅为.*预算部门审核预算提供参考依据/,
-    ],
-    skeleton: `五、其他需要说明的问题
-（一）本报告是评估机构根据项目单位所提供的资料进行全面分析与评估，并结合现场调研情况，在专家组意见的基础上综合形成的。
-（二）本报告仅为财政预算部门审核预算提供参考依据，不作其他用途。
-`,
-    hint: "保留报告形成依据和用途限制两项固定说明。",
-  },
-  {
-    id: "attachments",
-    label: "六、附件",
-    patterns: [
-      /六、附件/,
-      /1\.事前绩效评估项目预期绩效报告/,
-      /2\.绩效目标申报表/,
-      /3\.事前绩效评估专家评估意见书/,
-      /4\.专家组及工作组情况表/,
-    ],
-    skeleton: `六、附件
-1.事前绩效评估项目预期绩效报告
-2.绩效目标申报表
-3.事前绩效评估专家评估意见书
-4.专家组及工作组情况表
-`,
-    hint: "附件清单固定列示四项；没有对应文件时仍保留名称，并在归档前补齐。",
-  },
-] as const;
-const STRICT_REPORT_INSTRUCTION = `必须严格按照以下目录和顺序生成，不得改名、合并、删减、增加或调整章节：
+const buildStrictReportPrompt = (dimensions = DEFAULT_REPORT_DIMENSIONS) => `必须严格按照以下目录和顺序生成，不得改名、合并、删减、增加或调整章节：
 
-一、评估对象
-项目名称：
-项目单位：
-主管部门：
-项目属性：
-（一）项目绩效目标
-1.总体目标
-2.具体绩效指标
-（1）产出数量指标
-（2）产出质量指标
-（3）产出进度指标
-（4）产出成本指标
-（5）经济效益
-（6）社会效益指标
-（7）环境效益指标
-（8）可持续影响指标
-（9）服务对象满意度指标
-（二）项目资金总额
-（三）项目概况
-1.项目背景
-2.项目主要内容
-
-二、评估方式和方法
-（一）评估程序
-（二）评估思路及方法
-（三）评估方式
-1.项目基本情况现场调研
-2.查阅资料
-3.咨询专家
-4.召开专家预评估会
-5.召开正式专家会
-
-三、评估内容与结论
-（一）按当前项目关联的评估指标体系逐项展开
-（二）总体结论
-
-四、相关建议
-
-五、其他需要说明的问题
-（一）本报告是评估机构根据项目单位所提供的资料进行全面分析与评估，并结合现场调研情况，在专家组意见的基础上综合形成的。
-（二）本报告仅为财政预算部门审核预算提供参考依据，不作其他用途。
-
-六、附件
-1.事前绩效评估项目预期绩效报告
-2.绩效目标申报表
-3.事前绩效评估专家评估意见书
-4.专家组及工作组情况表
+${buildStrictReportInstruction(dimensions)}
 
 写作规则：
 1. 只使用“一、”“（一）”“1.”“（1）”四级中文编号，不使用 Markdown # 标题。
@@ -366,20 +205,101 @@ const getLocalDateInput = (date = new Date()) => {
   return `${year}-${month}-${day}`;
 };
 
-const getSectionPatterns = (section: (typeof REPORT_TEMPLATE_SECTIONS)[number], dimensions: string[]) =>
-  section.id === "evaluation_content" ? buildEvaluationContentPatterns(dimensions) : section.patterns;
+type ReportTemplateSection = ReturnType<typeof buildReportTemplateSections>[number];
 
-const getSectionSkeleton = (section: (typeof REPORT_TEMPLATE_SECTIONS)[number], dimensions: string[]) =>
-  section.id === "evaluation_content" ? buildEvaluationContentSkeleton(dimensions) : section.skeleton;
+interface GenerationStage {
+  label: string;
+  current?: number;
+  total?: number;
+  detail?: string;
+}
+
+const WRITING_STAGES: Array<{ heading: string; label: string }> = [
+  { heading: "四、相关建议", label: "正在撰写：四至六章（建议与附件）" },
+  { heading: "三、评估内容与结论", label: "正在撰写：第三章（评估内容与结论）" },
+  { heading: "二、评估方式和方法", label: "正在撰写：第二章（评估方式和方法）" },
+  { heading: "一、评估对象", label: "正在撰写：第一章（评估对象）" },
+];
+
+const writingStageLabel = (text: string) =>
+  WRITING_STAGES.find((stage) => text.includes(stage.heading))?.label ?? "正在撰写报告";
+
+const getSectionPatterns = (section: ReportTemplateSection) => section.patterns;
+
+const getSectionSkeleton = (section: ReportTemplateSection) => section.skeleton;
+
+const stripAppendedReportSkeleton = (input: string) => {
+  const text = String(input ?? "").trim();
+  if (!text) return text;
+  const plain = richTextToPlainText(text);
+  const appendix = plain.search(/六、附件[\s\S]*?(?:4[.．、]\s*专家组及工作组情况表|4\s*专家组及工作组情况表)/);
+  if (appendix < 0) return text;
+
+  const appendixText = plain.slice(appendix);
+  const marker = appendixText.search(/\n\s*(?:一、评估对象|项目名称：\s*$|项目单位：\s*$|主管部门：\s*$|项目属性：\s*$)/m);
+  if (marker < 0) return text;
+
+  return `${plain.slice(0, appendix)}${appendixText.slice(0, marker)}`.trim();
+};
+
+const stripDuplicateOpeningBeforeThirdChapter = (input: string) => {
+  const text = String(input ?? "").trim();
+  if (!text) return text;
+  const plain = richTextToPlainText(text);
+  const third = plain.indexOf("三、评估内容与结论");
+  if (third < 0) return text;
+  const firstOpening = plain.indexOf("一、评估对象");
+  if (firstOpening < 0 || firstOpening >= third) return text;
+  const secondOpening = plain.indexOf("一、评估对象", firstOpening + "一、评估对象".length);
+  if (secondOpening < 0 || secondOpening >= third) return text;
+  return `${plain.slice(0, secondOpening).trim()}\n\n${plain.slice(third).trim()}`.trim();
+};
+
+const headingIndex = (text: string, heading: string) => {
+  const direct = text.indexOf(heading);
+  if (direct >= 0) return direct;
+  const loose = new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*"));
+  return loose.exec(text)?.index ?? -1;
+};
+
+const stripGenericSuggestionTail = (input: string) => {
+  const plain = richTextToPlainText(String(input ?? "")).trim();
+  if (!plain) return plain;
+  const four = headingIndex(plain, "四、相关建议");
+  const five = headingIndex(plain, "五、其他需要说明的问题");
+  if (four < 0 || five < 0 || five <= four) return input;
+  const suggestions = plain.slice(four, five);
+  const genericStart = suggestions.search(/\n\s*1[.．、]\s*针对(?:立项必要性|项目必要性|投入经济性|项目经济性|绩效目标合理性|实施方案可行性|项目可行性|筹资合规性|可持续性|项目效益性)/);
+  if (genericStart < 0) return input;
+  const formalPart = suggestions.slice(0, genericStart).trim();
+  const formalCount = (formalPart.match(/^\s*（[一二三四五六七八九十]+）/gm) ?? []).length;
+  if (formalCount < 2) return input;
+  return `${plain.slice(0, four)}${formalPart}\n\n${plain.slice(five)}`.trim();
+};
+
+const stripReportInternalTerms = (input: string) =>
+  String(input ?? "")
+    .replace(/现有生成内容未完整覆盖该部分[，,、]?\s*请结合\s*RAG\s*V2\s*项目证据档案补充完善。?/g, "")
+    .replace(/现有生成内容未完整覆盖该部分。?/g, "")
+    .replace(/请结合\s*(?:RAG\s*V2\s*)?项目证据档案补充完善。?/g, "")
+    .replace(/RAG\s*V2\s*项目证据档案|Grounded\s*RAG\s*证据账本|当前项目证据矩阵/g, "项目资料依据")
+    .replace(/资料库\/文件库|文件库|资料库/g, "项目资料")
+    .replace(/(?:现有|当前)?(?:正文|资料)?索引(?:未检出|未读取)?(?:，?需人工核对或重新索引)?/g, "根据现有资料暂未见明确依据")
+    .replace(/未建索引|索引文件|索引片段|切片|OCR|RAG/g, "资料")
+    .replace(/需人工核对或重新索引|重新索引/g, "需补充资料来源并复核")
+    .replace(/共查阅项目资料中的资料\s*(\d+)\s*份[，,]\s*资料\s*\d+\s*份[，,]\s*资料\s*\d+\s*份。?/g, "共查阅项目单位提供的相关资料$1份，重点核验项目申报、预算测算、绩效目标、实施方案及专家意见等材料。")
+    .replace(/共查阅项目资料中的资料\s*(\d+)\s*份。?/g, "共查阅项目单位提供的相关资料$1份。")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
 const alignReportToTemplate = (input: string, dimensions = DEFAULT_REPORT_DIMENSIONS) => {
-  const text = input.trim();
-  if (!text) return text;
-  const missingSections = REPORT_TEMPLATE_SECTIONS.filter((section) =>
-    !getSectionPatterns(section, dimensions).every((pattern) => pattern.test(text))
+  const text = stripDeprecatedReportMethodSections(
+    stripGenericSuggestionTail(stripReportInternalTerms(stripDuplicateOpeningBeforeThirdChapter(stripAppendedReportSkeleton(input))))
   );
-  if (!missingSections.length) return text;
-  return `${text}\n\n${missingSections.map((section) => getSectionSkeleton(section, dimensions)).join("\n")}`.trim();
+  if (!text) return text;
+  // 不再自动补空模板。AI 输出/旧草稿如果缺章节，应在生成阶段修复；
+  // 导出阶段只做清理，避免 Word 末尾追加“空白模板”。
+  return text.trim();
 };
 
 const extractTemplateCoverTitle = (template?: Pick<RedlineTemplate, "name" | "content"> | null) => {
@@ -393,8 +313,31 @@ const extractTemplateCoverTitle = (template?: Pick<RedlineTemplate, "name" | "co
 const normalizeEditorContent = (value: string, dimensions = DEFAULT_REPORT_DIMENSIONS) => {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) return "";
-  if (/<[a-z][\s\S]*>/i.test(trimmed)) return trimmed;
-  return plainTextToHtml(alignReportToTemplate(trimmed, dimensions));
+  const cleanedPlain = alignReportToTemplate(trimmed, dimensions);
+  if (/<[a-z][\s\S]*>/i.test(trimmed)) {
+    const currentPlain = richTextToPlainText(trimmed).trim();
+    return cleanedPlain === currentPlain ? trimmed : plainTextToHtml(cleanedPlain);
+  }
+  return plainTextToHtml(cleanedPlain);
+};
+
+const getTopLevelReportDimensions = (indicators: EvaluationIndicator[]) =>
+  indicators
+    .filter((indicator) => indicator.level === null || Number(indicator.level ?? 1) === 1)
+    .map((indicator) => indicator.name.trim())
+    .filter(Boolean);
+
+const buildReportIndicatorInstruction = (indicators: EvaluationIndicator[]) => {
+  const topLevel = indicators.filter(
+    (indicator) => indicator.level === null || Number(indicator.level ?? 1) === 1,
+  );
+  if (!topLevel.length) return "";
+  return [
+    "当前项目已关联评估指标体系。第三章“评估内容与结论”必须严格按以下一级指标展开，不得替换为默认五项：",
+    ...topLevel.map((indicator, index) =>
+      `${index + 1}. ${indicator.code ? `[${indicator.code}] ` : ""}${indicator.name}${indicator.weight !== null && indicator.weight !== undefined ? `（权重 ${indicator.weight}）` : ""}`
+    ),
+  ].join("\n");
 };
 
 const Reports = () => {
@@ -413,11 +356,15 @@ const Reports = () => {
   const [extra, setExtra] = useState(cachedWorkspace?.extra ?? "");
   const [activeTab, setActiveTab] = useState<"report" | "rect">(cachedWorkspace?.activeTab ?? "report");
   const [content, setContent] = useState(cachedWorkspace?.content ?? "");
+  const [reportEvidenceCards, setReportEvidenceCards] = useState<ReportEvidenceCard[]>([]);
+  const [reportVerification, setReportVerification] = useState<ComprehensiveReportVerification | null>(null);
   const [conclusion, setConclusion] = useState<string>(cachedWorkspace?.conclusion ?? "");
   const [unsupportedBudgetWan, setUnsupportedBudgetWan] = useState(cachedWorkspace?.unsupportedBudgetWan ?? "");
   const [supportedBudgetWan, setSupportedBudgetWan] = useState(cachedWorkspace?.supportedBudgetWan ?? "");
   const [summaryRemark, setSummaryRemark] = useState(cachedWorkspace?.summaryRemark ?? "");
   const [generating, setGenerating] = useState(false);
+  const [generationStage, setGenerationStage] = useState<GenerationStage | null>(null);
+  const [editorToolbarSlot, setEditorToolbarSlot] = useState<HTMLDivElement | null>(null);
   const [saving, setSaving] = useState(false);
   const [rects, setRects] = useState<Rectification[]>(cachedWorkspace?.rects ?? []);
   const [generatingRect, setGeneratingRect] = useState(false);
@@ -434,13 +381,21 @@ const Reports = () => {
   const [shareOpen, setShareOpen] = useState(false);
   const [proofing, setProofing] = useState(false);
   const [proofingSnapshot, setProofingSnapshot] = useState<ProofingSnapshot | null>(null);
+  const [reportFullscreen, setReportFullscreen] = useState(false);
   const reportPrintAreaRef = useRef<HTMLDivElement | null>(null);
   const rectViewportRef = useRef<HTMLDivElement | null>(null);
+  const fullscreenReportScrollRef = useRef<HTMLDivElement | null>(null);
+  const reportDimensions = useMemo(() => {
+    const topLevel = getTopLevelReportDimensions(reportIndicators);
+    return topLevel.length ? topLevel : DEFAULT_REPORT_DIMENSIONS;
+  }, [reportIndicators]);
+  const reportTemplateSections = useMemo(() => buildReportTemplateSections(reportDimensions), [reportDimensions]);
+  const strictReportInstruction = useMemo(() => buildStrictReportPrompt(reportDimensions), [reportDimensions]);
   const normalizedContent = useMemo(() => richTextToPlainText(content).replace(/\s+/g, ""), [content]);
   const tocEntries = useMemo(() => extractReportTocEntries(content), [content]);
   const fallbackTocEntries = useMemo(
-    () => (content ? REPORT_TEMPLATE_SECTIONS.map((section) => ({ text: section.label, level: 1 as const })) : []),
-    [content],
+    () => (content ? reportTemplateSections.map((section) => ({ text: section.label, level: 1 as const })) : []),
+    [content, reportTemplateSections],
   );
   const resolvedTocEntries = tocEntries.length ? tocEntries : fallbackTocEntries;
   const formatWan = (value: number | null | undefined) => {
@@ -630,6 +585,11 @@ const Reports = () => {
   }, [pid, currentReportId]);
 
   useEffect(() => {
+    setReportEvidenceCards([]);
+    setReportVerification(null);
+  }, [pid]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     const payload: ReportsWorkspaceCache = {
       pid,
@@ -671,18 +631,114 @@ const Reports = () => {
     unsupportedBudgetWan,
   ]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setReportFullscreen(false);
+    };
+    if (reportFullscreen) {
+      document.body.style.overflow = "hidden";
+      window.addEventListener("keydown", onKeyDown);
+    }
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [reportFullscreen]);
+
+  useEffect(() => {
+    if (activeTab !== "report") setReportFullscreen(false);
+  }, [activeTab]);
+
   const project = projects.find((p) => p.id === pid);
+
+  const annotateReportCitations = async (html: string, options?: { silent?: boolean; force?: boolean }) => {
+    const normalized = options?.force
+      ? stripReportCitations(normalizeEditorContent(html, reportDimensions))
+      : normalizeEditorContent(html, reportDimensions);
+    if (!project?.id || !normalized.trim()) {
+      setReportEvidenceCards([]);
+      return normalized;
+    }
+    if (hasReportCitations(normalized) && reportEvidenceCards.length) return normalized;
+
+    const applyAndToast = (citations: any[], evidenceCards: ReportEvidenceCard[] = []) => {
+      setReportEvidenceCards(evidenceCards);
+      const marked = citations.length ? applyReportCitations(normalized, citations) : normalized;
+      if (!options?.silent) {
+        const referencedFiles = evidenceCards.filter((item) => item.status === "referenced").length;
+        const suffix = evidenceCards.length ? `，覆盖 ${referencedFiles}/${evidenceCards.length} 份资料` : "";
+        toast.success(`已生成正文依据链${citations.length ? `并高亮 ${citations.length} 条` : ""}${suffix}`);
+      }
+      return marked;
+    };
+
+    try {
+      const { data, error } = await supabase.functions.invoke("report-citations", {
+        body: {
+          projectId: project.id,
+          project,
+          content: richTextToPlainText(normalized),
+          limit: 90,
+          evidenceLimit: 120,
+        },
+      });
+      if (error) throw error;
+      const citations = (data as any)?.citations ?? [];
+      const evidenceCards = ((data as any)?.evidenceCards ?? []) as ReportEvidenceCard[];
+      return applyAndToast(citations, evidenceCards);
+    } catch (error) {
+      console.warn("report citation annotation failed", error);
+      try {
+        const [{ data: files }, { data: chunks }] = await Promise.all([
+          supabase
+            .from("knowledge_files")
+            .select("id,title,file_name,category,summary,chunk_count,status,updated_at")
+            .eq("project_id", project.id)
+            .eq("status", "indexed")
+            .limit(120),
+          supabase
+            .from("knowledge_chunks")
+            .select("id,file_id,project_id,chunk_index,content,metadata")
+            .eq("project_id", project.id)
+            .order("file_id", { ascending: true })
+            .order("chunk_index", { ascending: true })
+            .limit(420),
+        ]);
+        const plain = richTextToPlainText(normalized);
+        return applyAndToast(
+          buildLocalReportCitations(plain, files ?? [], chunks ?? [], 90),
+          buildLocalReportEvidenceCards(plain, files ?? [], chunks ?? [], 120),
+        );
+      } catch (fallbackError) {
+        console.warn("local report citation annotation failed", fallbackError);
+        setReportEvidenceCards([]);
+        if (!options?.silent) toast.warning("报告已生成，引用高亮暂未完成");
+        return normalized;
+      }
+    }
+  };
+
+  const refreshReportCitations = async () => {
+    if (!content.trim()) return;
+    const marked = await annotateReportCitations(content, { force: true });
+    setContent(marked);
+  };
+
   useEffect(() => {
     if (!project?.evaluation_system_id) {
       setReportIndicators([]);
       return;
     }
+    let cancelled = false;
+    setReportIndicators([]);
     supabase
       .from("evaluation_indicators")
       .select("id,code,name,weight,level,sort_order")
       .eq("system_id", project.evaluation_system_id)
       .order("sort_order", { ascending: true })
       .then(({ data, error }) => {
+        if (cancelled) return;
         if (error) {
           toast.error(`读取评估指标失败：${error.message}`);
           setReportIndicators([]);
@@ -690,25 +746,14 @@ const Reports = () => {
         }
         setReportIndicators((data as EvaluationIndicator[] | null) ?? []);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [project?.evaluation_system_id]);
-  const reportDimensions = useMemo(() => {
-    const topLevel = reportIndicators
-      .filter((indicator) => indicator.level === null || Number(indicator.level ?? 1) === 1)
-      .map((indicator) => indicator.name.trim())
-      .filter(Boolean);
-    return topLevel.length ? topLevel : DEFAULT_REPORT_DIMENSIONS;
-  }, [reportIndicators]);
-  const reportIndicatorInstruction = useMemo(() => {
-    if (!reportIndicators.length) return "";
-    const topLevel = reportIndicators.filter((indicator) => indicator.level === null || Number(indicator.level ?? 1) === 1);
-    if (!topLevel.length) return "";
-    return [
-      "当前项目已关联评估指标体系。第三章“评估内容与结论”必须严格按以下一级指标展开，不得替换为默认五项：",
-      ...topLevel.map((indicator, index) =>
-        `${index + 1}. ${indicator.code ? `[${indicator.code}] ` : ""}${indicator.name}${indicator.weight !== null && indicator.weight !== undefined ? `（权重 ${indicator.weight}）` : ""}`
-      ),
-    ].join("\n");
-  }, [reportIndicators]);
+  const reportIndicatorInstruction = useMemo(
+    () => buildReportIndicatorInstruction(reportIndicators),
+    [reportIndicators],
+  );
   const availableRedlineTemplates = useMemo(
     () => [
       ...BUILTIN_REDLINE_TEMPLATES,
@@ -832,6 +877,19 @@ const Reports = () => {
     window.localStorage.setItem(projectRedlinePreferenceKey, selectedRedlineTemplateKey);
   }, [projectRedlinePreferenceKey, selectedRedlineTemplateKey]);
 
+  // Ctrl/⌘ + S 保存草稿。编辑器是普通输入区，浏览器默认的“保存网页”对这里毫无意义，
+  // 拦掉它换成保存草稿更符合预期。
+  const saveShortcutRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      saveShortcutRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const snapshotCurrentProofingState = (): ProofingSnapshot => ({
     content,
     supervisingDepartment,
@@ -856,9 +914,9 @@ const Reports = () => {
   };
 
   const templateAudit = useMemo(() => {
-    const sectionChecks = REPORT_TEMPLATE_SECTIONS.map((section) => ({
+    const sectionChecks = reportTemplateSections.map((section) => ({
       ...section,
-      matched: getSectionPatterns(section, reportDimensions).every((pattern) => pattern.test(content)),
+      matched: getSectionPatterns(section).every((pattern) => pattern.test(content)),
     }));
     return [
       {
@@ -875,7 +933,7 @@ const Reports = () => {
       },
       ...sectionChecks,
     ];
-  }, [conclusion, content, normalizedContent, project, reportDimensions]);
+  }, [conclusion, content, normalizedContent, project, reportTemplateSections]);
   const missingTemplateSections = templateAudit.filter((item) => !item.matched);
   const polishPrompt = useMemo(() => {
     if (!project) return "";
@@ -890,12 +948,12 @@ const Reports = () => {
       reportIndicatorInstruction,
       "要求：",
       "1. 保留现有项目事实，不虚构数据。",
-      `2. ${STRICT_REPORT_INSTRUCTION}`,
+      `2. ${strictReportInstruction}`,
       "3. 对政策依据、预算测算、绩效目标、满意度、时间进度等薄弱处用正式评估语言细化。",
       "4. 若发现论证不足，请明确写出风险点、补充资料要求和后续整改建议。",
       economicAnalysis,
     ].join("\n");
-  }, [budgetSummary.supportedWan, budgetSummary.unsupportedWan, conclusion, economicAnalysis, evaluationOrg, missingTemplateSections, project, reportIndicatorInstruction, supervisingDepartment, thirdPartyOrg]);
+  }, [budgetSummary.supportedWan, budgetSummary.unsupportedWan, conclusion, economicAnalysis, evaluationOrg, missingTemplateSections, project, reportIndicatorInstruction, strictReportInstruction, supervisingDepartment, thirdPartyOrg]);
 
   const sourceTraceItems = useMemo(() => [
     { label: "项目基础信息", active: Boolean(project), detail: project ? `${project.unit} · ${project.budget.toLocaleString()} 元` : "未选择项目" },
@@ -924,6 +982,8 @@ const Reports = () => {
   const resetDraft = () => {
     setCurrentReportId(null);
     setContent("");
+    setReportEvidenceCards([]);
+    setReportVerification(null);
     setConclusion("");
     setUnsupportedBudgetWan("");
     setSupportedBudgetWan("");
@@ -936,32 +996,153 @@ const Reports = () => {
 
   const insertMissingTemplateSections = () => {
     if (!content) return toast.error("请先生成报告正文");
-    const missingSections = REPORT_TEMPLATE_SECTIONS.filter((section) =>
-      !getSectionPatterns(section, reportDimensions).every((pattern) => pattern.test(content))
+    const missingSections = reportTemplateSections.filter((section) =>
+      !getSectionPatterns(section).every((pattern) => pattern.test(content))
     );
     if (!missingSections.length) {
       toast.success("标准章节已较完整，无需自动补齐");
       return;
     }
-    const append = missingSections.map((section) => getSectionSkeleton(section, reportDimensions)).join("\n");
+    const append = missingSections.map((section) => getSectionSkeleton(section)).join("\n");
     setContent((prev) => `${prev.trim()}\n\n${append}`.trim());
     toast.success(`已补入 ${missingSections.length} 个标准章节骨架`);
+  };
+
+  /**
+   * 报告生成会因为“有资料没解析出正文”被前置核验直接阻断，而解析失败往往只是
+   * 上传时解析服务不可用。生成前先把这些资料补齐，避免用户看到一个无法自助解决的
+   * 阻断提示。逐个处理是有意为之：解析扫描件要走 OCR，批量并发会拖垮解析服务。
+   */
+  const repairUnindexedMaterials = async (projectId: string) => {
+    setGenerationStage({ label: "检查资料解析状态" });
+    const [materialRes, indexRes] = await Promise.all([
+      supabase
+        .from("materials")
+        .select("id,name,file_name")
+        .eq("project_id", projectId)
+        .not("file_path", "is", null),
+      (supabase as any)
+        .from("knowledge_files")
+        .select("source_id,status,chunk_count,error_message")
+        .eq("project_id", projectId)
+        .eq("source_type", "material"),
+    ]);
+    if (materialRes.error) return;
+
+    const indexBySource = new Map(
+      ((indexRes.data as any[]) ?? [])
+        .filter((row) => row?.source_id)
+        .map((row) => [String(row.source_id), row]),
+    );
+    const pending = ((materialRes.data as any[]) ?? []).filter((material) => {
+      const row = indexBySource.get(String(material.id));
+      if (!row) return true;
+      if (row.status !== "indexed") return true;
+      if (Number(row.chunk_count ?? 0) <= 0) return true;
+      return /未提取|文件信息级|metadata_only/i.test(String(row.error_message ?? ""));
+    });
+    if (!pending.length) return;
+
+    let repaired = 0;
+    for (const [index, material] of pending.entries()) {
+      const fileName = String(material.file_name || material.name || "项目资料");
+      setGenerationStage({
+        label: "正在解析资料",
+        current: index + 1,
+        total: pending.length,
+        detail: fileName,
+      });
+      try {
+        const { error } = await supabase.functions.invoke("ingest-project-knowledge", {
+          body: { materialId: material.id, force: true, limit: 1 },
+        });
+        if (error) throw error;
+        repaired += 1;
+      } catch (error) {
+        console.warn("repair material index failed", fileName, error);
+      }
+    }
+    if (repaired) toast.info(`已重新解析 ${repaired}/${pending.length} 份未完成解析的资料`);
+  };
+
+  /**
+   * 核验阻断时，按核验结果点名的资料强制重新解析。
+   *
+   * 与生成前的自检不同：这里处理的是“已经索引过、但报告读不出可用正文”的资料，
+   * 只有核验结果知道是哪几份，所以必须用它回传的 sourceId。
+   */
+  const repairBlockedMaterials = async (
+    verification?: ComprehensiveReportVerification | null,
+  ) => {
+    const targets = (verification?.files ?? [])
+      .filter((file) =>
+        file.status === "unreadable"
+        && String(file.sourceType ?? "") === "material"
+        && file.sourceId
+      )
+      .slice(0, 12);
+    if (!targets.length) return false;
+
+    let repaired = 0;
+    for (const [index, file] of targets.entries()) {
+      setGenerationStage({
+        label: "正在重新解析未通过核验的资料",
+        current: index + 1,
+        total: targets.length,
+        detail: file.fileName,
+      });
+      try {
+        const { error } = await supabase.functions.invoke("ingest-project-knowledge", {
+          body: { materialId: file.sourceId, force: true, limit: 1 },
+        });
+        if (error) throw error;
+        repaired += 1;
+      } catch (error) {
+        console.warn("repair blocked material failed", file.fileName, error);
+      }
+    }
+    if (!repaired) return false;
+    toast.info(`已重新解析 ${repaired}/${targets.length} 份未通过核验的资料，正在重试生成`);
+    return true;
   };
 
   const generate = async () => {
     if (!project) return toast.error("请先选择评估对象");
     setGenerating(true);
+    setGenerationStage({ label: "准备生成" });
     clearProofingState();
+    setReportEvidenceCards([]);
+    setReportVerification(null);
     setContent(""); setRects([]); setCurrentReportId(null);
-    setSupervisingDepartment(project.unit || "");
-    setEvaluationOrg(DEFAULT_EVALUATION_ORG);
-    setThirdPartyOrg(project.agent_org || "");
-    setUnsupportedBudgetWan("");
-    setSupportedBudgetWan("");
-    setSummaryRemark("");
+    // 封面机构、结论口径和备注是用户手填的，重新生成只重写正文，不该把这些清空——
+    // 之前每点一次生成就要重填一遍。仅在字段还是空的时候补默认值。
+    setSupervisingDepartment((current) => current.trim() || project.unit || "");
+    setEvaluationOrg((current) => current.trim() || DEFAULT_EVALUATION_ORG);
+    setThirdPartyOrg((current) => current.trim() || project.agent_org || "");
     try {
+      let generationIndicators: EvaluationIndicator[] = [];
+      if (project.evaluation_system_id) {
+        const { data, error } = await supabase
+          .from("evaluation_indicators")
+          .select("id,code,name,weight,level,sort_order")
+          .eq("system_id", project.evaluation_system_id)
+          .order("sort_order", { ascending: true });
+        if (error) throw new Error(`读取当前项目评估指标失败：${error.message}`);
+        generationIndicators = (data as EvaluationIndicator[] | null) ?? [];
+        setReportIndicators(generationIndicators);
+      }
+      const currentDimensions = getTopLevelReportDimensions(generationIndicators);
+      const generationDimensions = currentDimensions.length
+        ? currentDimensions
+        : DEFAULT_REPORT_DIMENSIONS;
+      const generationStrictInstruction = buildStrictReportPrompt(generationDimensions);
+      const generationIndicatorInstruction = buildReportIndicatorInstruction(generationIndicators);
+
+      if (project.id) await repairUnindexedMaterials(project.id);
+
+      setGenerationStage({ label: "正在核验资料并检索证据" });
       const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-report`;
-      const res = await fetch(url, {
+      const requestReport = () => fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -969,19 +1150,44 @@ const Reports = () => {
         },
         body: JSON.stringify({
           project,
-          extra: [STRICT_REPORT_INSTRUCTION, reportIndicatorInstruction, economicAnalysis, extra.trim()].filter(Boolean).join("\n\n"),
+          extra: [
+            generationStrictInstruction,
+            generationIndicatorInstruction,
+            economicAnalysis,
+            extra.trim(),
+          ].filter(Boolean).join("\n\n"),
         }),
       });
+      let res = await requestReport();
       if (res.status === 429) { toast.error("AI 调用过于频繁，请稍后重试"); setGenerating(false); return; }
       if (res.status === 402) { toast.error("AI 用量已耗尽"); setGenerating(false); return; }
-      if (!res.ok || !res.body) throw new Error("AI 服务调用失败");
+      if (!res.ok || !res.body) {
+        const failed = await res.json().catch(() => null);
+        if (failed?.verification) setReportVerification(failed.verification);
+        // 核验只会告诉用户“这些资料读不出正文”，但用户在界面上没有别的自助手段，
+        // 只能一份份去文件库重建。既然阻断原因里已经带着文件标识，这里直接重解析
+        // 再重试一次；仍然失败才把问题交回给用户。
+        const repairedNow = await repairBlockedMaterials(failed?.verification);
+        if (repairedNow) {
+          setGenerationStage({ label: "资料已重新解析，正在重新生成" });
+          res = await requestReport();
+        }
+        if (!res.ok || !res.body) {
+          const stillFailed = repairedNow ? await res.json().catch(() => null) : failed;
+          if (stillFailed?.verification) setReportVerification(stillFailed.verification);
+          throw new Error(stillFailed?.error || failed?.error || "AI 服务调用失败");
+        }
+      }
       const scoreInjected = res.headers.get("X-Score-Injected") === "1";
       const ragTags = [
         scoreInjected && "评分",
+        Number(res.headers.get("X-Rag-Grounded-Files") || 0) > 0 && `资料依据×${res.headers.get("X-Rag-Grounded-Files")}`,
+        Number(res.headers.get("X-Rag-Grounded-Facts") || 0) > 0 && `硬事实×${res.headers.get("X-Rag-Grounded-Facts")}`,
+        Number(res.headers.get("X-Rag-Grounded-Evidence") || 0) > 0 && `指标证据×${res.headers.get("X-Rag-Grounded-Evidence")}`,
         Number(res.headers.get("X-Rag-Overview") || 0) > 0 && `资料全景×${res.headers.get("X-Rag-Overview")}`,
-        Number(res.headers.get("X-Rag-Priority-Chunks") || 0) > 0 && `重点片段×${res.headers.get("X-Rag-Priority-Chunks")}`,
-        Number(res.headers.get("X-Rag-Indexed") || 0) > 0 && `新索引×${res.headers.get("X-Rag-Indexed")}`,
-        Number(res.headers.get("X-Rag-Knowledge") || 0) > 0 && `文件库×${res.headers.get("X-Rag-Knowledge")}`,
+        Number(res.headers.get("X-Rag-Priority-Chunks") || 0) > 0 && `重点依据×${res.headers.get("X-Rag-Priority-Chunks")}`,
+        Number(res.headers.get("X-Rag-Indexed") || 0) > 0 && `新资料×${res.headers.get("X-Rag-Indexed")}`,
+        Number(res.headers.get("X-Rag-Knowledge") || 0) > 0 && `资料×${res.headers.get("X-Rag-Knowledge")}`,
         Number(res.headers.get("X-Rag-Materials") || 0) > 0 && `资料×${res.headers.get("X-Rag-Materials")}`,
         Number(res.headers.get("X-Rag-History") || 0) > 0 && `历史×${res.headers.get("X-Rag-History")}`,
         Number(res.headers.get("X-Rag-Goals") || 0) > 0 && `目标×${res.headers.get("X-Rag-Goals")}`,
@@ -1013,8 +1219,36 @@ const Reports = () => {
             }
             try {
               const p = JSON.parse(json);
+              if (p.type === "replace" && typeof p.content === "string") {
+                acc = p.content;
+                setContent(acc);
+                continue;
+              }
+              if (p.type === "verification" && p.verification) {
+                const verification = p.verification as ComprehensiveReportVerification;
+                setReportVerification(verification);
+                if (verification.phase === "preflight") {
+                  setGenerationStage({
+                    label: "正在撰写报告",
+                    detail: `资料核验通过 ${verification.checkedFiles}/${verification.totalFiles}`,
+                  });
+                }
+                continue;
+              }
+              if (p.type === "error") {
+                streamError = new Error(String(p.message || "报告生成未完成"));
+                done = true;
+                break;
+              }
               const c = p.choices?.[0]?.delta?.content;
-              if (c) { acc += c; setContent(acc); }
+              if (c) {
+                acc += c;
+                setContent(acc);
+                setGenerationStage({
+                  label: writingStageLabel(acc),
+                  detail: `已生成 ${acc.length} 字`,
+                });
+              }
             } catch {
               buf = line + "\n" + buf;
               break;
@@ -1025,10 +1259,27 @@ const Reports = () => {
         streamError = error instanceof Error ? error : new Error("网络连接中断");
       }
       if (!acc.trim()) throw streamError ?? new Error("AI 未返回报告内容");
-      const generatedHtml = normalizeEditorContent(acc, reportDimensions);
-      const generatedPlain = richTextToPlainText(generatedHtml);
-      const looksComplete = ["四、相关建议", "五、其他需要说明的问题", "六、附件"]
-        .every((section) => generatedPlain.includes(section));
+      if (streamError) throw streamError;
+      if (!sawDoneSignal) throw new Error("AI 生成中断，未收到完整结束信号。请重新生成，系统不会保存半截报告。");
+      const generatedPlainBeforeCitations = richTextToPlainText(
+        normalizeEditorContent(acc, generationDimensions),
+      );
+      const normalizedGeneratedPlain = normalizeReportFormalTail(generatedPlainBeforeCitations);
+      const completeness = checkReportCompleteness(
+        normalizedGeneratedPlain,
+        generationDimensions,
+      );
+      if (!completeness.complete) {
+        setContent(normalizeEditorContent(normalizedGeneratedPlain, generationDimensions));
+        const missingSummary = completeness.missing.slice(0, 6).join("、");
+        const remainder = completeness.missing.length > 6
+          ? `等 ${completeness.missing.length} 项`
+          : "";
+        throw new Error(`AI 生成结果缺少：${missingSummary}${remainder}。已保留当前内容，请重新生成缺失部分。`);
+      }
+      const generatedHtml = await annotateReportCitations(
+        normalizeEditorContent(normalizedGeneratedPlain, generationDimensions),
+      );
       setContent(generatedHtml);
       if (user) {
         const { data, error } = await withReportWriteFallback(
@@ -1041,17 +1292,14 @@ const Reports = () => {
         );
         if (error) throw error;
         setCurrentReportId(data.id);
-        await snapshotVersion(data.id, "ai", streamError || !looksComplete || !sawDoneSignal ? "AI 生成中断后自动保存" : "AI 初次生成", generatedHtml);
+        await snapshotVersion(data.id, "ai", "AI 初次生成", generatedHtml);
       }
-      if (streamError || !looksComplete || !sawDoneSignal) {
-        toast.warning(`报告已保存为草稿，但生成可能未完整${ragTags ? ` · 已注入 ${ragTags}` : ""}，可继续编辑或重新生成`);
-      } else {
-        toast.success(`报告生成完成${ragTags ? ` · 已注入 ${ragTags}` : ""} · 已自动记录，可直接继续编辑`);
-      }
+      toast.success(`报告生成完成${ragTags ? ` · 已注入 ${ragTags}` : ""} · 已自动记录，可直接继续编辑`);
     } catch (e: any) {
       toast.error(e.message ?? "生成失败");
     } finally {
       setGenerating(false);
+      setGenerationStage(null);
     }
   };
 
@@ -1206,8 +1454,14 @@ const Reports = () => {
     );
   };
 
-  const loadReport = (r: Report) => {
-    setContent(normalizeEditorContent(r.content ?? "", reportDimensions));
+  saveShortcutRef.current = () => {
+    if (!content || saving || isCurrentFinalized) return;
+    void save("draft", { successMessage: "草稿已保存，可在右侧「生成记录」中查看和载入" });
+  };
+
+  const loadReport = async (r: Report) => {
+    const loadedContent = await annotateReportCitations(normalizeEditorContent(r.content ?? "", reportDimensions), { silent: true });
+    setContent(loadedContent);
     setConclusion(r.conclusion ?? "");
     setSupervisingDepartment(r.supervising_department ?? project?.unit ?? "");
     setEvaluationOrg(r.evaluation_org ?? DEFAULT_EVALUATION_ORG);
@@ -1498,11 +1752,99 @@ const Reports = () => {
             <div className="rounded-lg border border-accent/30 bg-accent/5 p-3 space-y-2">
               <Button variant="hero" onClick={generate} disabled={!project || generating} className="w-full justify-center">
                 <Sparkles className="h-4 w-4" />
-                {generating ? "AI 撰写中…" : "AI 一键生成报告"}
+                {generating ? (generationStage?.label ?? "AI 生成中…") : "AI 一键生成报告"}
               </Button>
+              {generating && generationStage && (
+                <div className="rounded-md border border-accent/30 bg-accent/5 px-3 py-2 text-xs">
+                  <div className="flex items-center gap-2 font-medium">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
+                    <span>{generationStage.label}</span>
+                    {generationStage.total ? (
+                      <span className="text-muted-foreground">
+                        {generationStage.current}/{generationStage.total}
+                      </span>
+                    ) : null}
+                  </div>
+                  {generationStage.detail && (
+                    <p className="mt-1 break-all text-muted-foreground">{generationStage.detail}</p>
+                  )}
+                  {generationStage.total ? (
+                    <div className="mt-2 h-1 w-full overflow-hidden rounded bg-muted">
+                      <div
+                        className="h-full bg-accent transition-all"
+                        style={{
+                          width: `${Math.round(
+                            ((generationStage.current ?? 0) / Math.max(1, generationStage.total)) * 100,
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              )}
               <p className="text-[11px] leading-relaxed text-muted-foreground">
-                确认封面信息、结论口径后生成报告；生成后可在右侧正文继续编辑。
+                确认封面信息、结论口径后生成报告；生成后可在右侧正文继续编辑。扫描件需要 OCR，首次解析会慢一些。
               </p>
+              {reportVerification && (
+                <div className={`rounded-md border px-3 py-2 text-xs ${
+                  reportVerification.status === "passed"
+                    ? "border-success/30 bg-success/5"
+                    : reportVerification.status === "blocked"
+                    ? "border-destructive/30 bg-destructive/5"
+                    : "border-accent/30 bg-accent/5"
+                }`}>
+                  <div className="flex items-center gap-2 font-medium">
+                    {reportVerification.status === "passed"
+                      ? <CheckCircle2 className="h-4 w-4 text-success" />
+                      : <AlertTriangle className={`h-4 w-4 ${
+                        reportVerification.status === "blocked" ? "text-destructive" : "text-accent"
+                      }`} />}
+                    全面核验：{reportVerification.status === "passed"
+                      ? "通过"
+                      : reportVerification.status === "blocked"
+                      ? "已阻止"
+                      : "需人工确认"}
+                  </div>
+                  <p className="mt-1 text-muted-foreground">{reportVerification.summary}</p>
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+                    <span>资料 {reportVerification.checkedFiles}/{reportVerification.totalFiles}</span>
+                    <span>指标 {reportVerification.dimensionsCovered}/{reportVerification.dimensionsChecked}</span>
+                    {reportVerification.phase === "final" && reportVerification.targetFactsChecked > 0 && (
+                      <span>目标值 {reportVerification.targetFactsPresent}/{reportVerification.targetFactsChecked}</span>
+                    )}
+                  </div>
+                  {(reportVerification.files ?? []).some((file) => file.status === "unreadable") && (
+                    <div className="mt-2 rounded border border-destructive/20 bg-background/70 px-2 py-1.5">
+                      <div className="font-medium text-destructive">未完成解析资料</div>
+                      <div className="mt-1 space-y-1 text-muted-foreground">
+                        {(reportVerification.files ?? [])
+                          .filter((file) => file.status === "unreadable")
+                          .slice(0, 6)
+                          .map((file) => (
+                            <p key={file.fileId} className="leading-relaxed">
+                              {file.fileName}
+                              {file.errorMessage ? `（${file.errorMessage}）` : ""}
+                            </p>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  {reportVerification.issues.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {reportVerification.issues.slice(0, 4).map((issue) => (
+                        <p key={`${issue.code}:${issue.detail}`} className="leading-relaxed">
+                          <span className="font-medium">{issue.title}：</span>{issue.detail}
+                          {issue.sourceNames?.length ? (
+                            <span className="block text-muted-foreground">
+                              涉及资料：{issue.sourceNames.slice(0, 6).join("、")}
+                            </span>
+                          ) : null}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
                 </TabsContent>
 
@@ -1527,6 +1869,9 @@ const Reports = () => {
                 <Button onClick={openRewriteForSelection} disabled={!content || isCurrentFinalized} variant="outline" className="w-full justify-center">
                   <Wand2 className="h-4 w-4" /> AI 段落重写
                 </Button>
+                <Button onClick={refreshReportCitations} disabled={!content} variant="outline" className="w-full justify-center">
+                  <RefreshCw className="h-4 w-4" /> 重新标注出处
+                </Button>
                 <Button onClick={openProofingPreview} disabled={!content} variant={proofing ? "hero" : "outline"} className="w-full justify-center">
                   <Stamp className="h-4 w-4" /> {proofing ? "刷新套红预览" : "套红试印预览"}
                 </Button>
@@ -1547,7 +1892,7 @@ const Reports = () => {
                 </Button>
                 <Button
                   onClick={exportStandardReport}
-                  disabled={!content || !project}
+                  disabled={!content || !project || reportVerification?.status === "blocked"}
                   variant="hero"
                   size="sm"
                   title="导出标准评估报告（附件 10-1）"
@@ -1610,36 +1955,66 @@ const Reports = () => {
 
         {/* 右侧：报告 + 整改 Tabs */}
           <Card className="surface-card min-w-0 xl:self-start xl:overflow-hidden">
-            <CardContent className="flex flex-col p-6">
+            <CardContent className="flex min-h-0 flex-col p-6">
               <div className="flex flex-col">
-              <div className="inline-flex w-fit rounded-full border border-border bg-muted/50 p-1 shadow-inner">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("report")}
-                  className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
-                    activeTab === "report"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  报告正文
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("rect")}
-                  className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
-                    activeTab === "rect"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  整改建议
-                  {rects.length > 0 && (
-                    <span className="ml-2 rounded-full bg-accent/10 px-2 py-0.5 font-mono text-[11px] text-accent">
-                      {adopted.size}/{rects.length}
-                    </span>
-                  )}
-                </button>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="inline-flex w-fit rounded-full border border-border bg-muted/50 p-1 shadow-inner">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("report")}
+                    className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                      activeTab === "report"
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    报告正文
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("rect")}
+                    className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                      activeTab === "rect"
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    整改建议
+                    {rects.length > 0 && (
+                      <span className="ml-2 rounded-full bg-accent/10 px-2 py-0.5 font-mono text-[11px] text-accent">
+                        {adopted.size}/{rects.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
+                {activeTab === "report" && (
+                  <div className="flex min-w-0 shrink-0 items-center gap-2">
+                    {/* 富文本工具栏 portal 到这里：留在稿纸里会随内容滚走或压住正文 */}
+                    <div ref={setEditorToolbarSlot} className="flex min-w-0 items-center overflow-x-auto" />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => save("draft", {
+                        successMessage: "草稿已保存，可在右侧「生成记录」中查看和载入",
+                      })}
+                      disabled={!content || saving || isCurrentFinalized}
+                      title="保存当前正文为草稿（Ctrl/⌘ + S）"
+                    >
+                      {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                      保存草稿
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setReportFullscreen((value) => !value)}
+                    >
+                      {reportFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                      {reportFullscreen ? "退出全屏" : "全屏查看"}
+                    </Button>
+                  </div>
+                )}
               </div>
 
               {activeTab === "report" && (
@@ -1736,6 +2111,7 @@ const Reports = () => {
                             onSelectionChange={setSelectedRewriteText}
                             editable={!isCurrentFinalized}
                             variant="document"
+                            toolbarContainer={editorToolbarSlot}
                           />
                         )}
                       </WatermarkOverlay>
@@ -1854,6 +2230,112 @@ const Reports = () => {
           </Card>
         </div>
       </div>
+
+      {reportFullscreen && activeTab === "report" && createPortal(
+        <div className="fixed inset-0 z-[100] grid place-items-center overflow-hidden bg-slate-950/45 p-2 backdrop-blur-sm sm:p-5">
+          <div className="flex h-[94dvh] max-h-[calc(100dvh-1rem)] w-[98vw] max-w-[1720px] flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl sm:max-h-[calc(100dvh-2.5rem)]">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border bg-card/95 px-4 py-3 backdrop-blur sm:px-5">
+              <div className="min-w-0">
+                <div className="section-eyebrow">READING MODE · 报告审阅</div>
+                <div className="truncate font-display text-lg font-bold text-foreground">
+                  {project ? `${project.name} · 事前绩效评估报告` : "评估报告正文"}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <StatusPill tone={isCurrentFinalized ? "success" : "neutral"} dot={false}>
+                  {isCurrentFinalized ? "已定稿" : "可编辑"}
+                </StatusPill>
+                <Button type="button" variant="outline" size="sm" onClick={() => setReportFullscreen(false)}>
+                  <Minimize2 className="h-4 w-4" />
+                  退出全屏
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid min-h-0 flex-1 grid-cols-1 bg-muted/25 lg:grid-cols-[280px_minmax(0,1fr)]">
+              <aside className="hidden min-h-0 border-r border-border bg-card/80 p-4 lg:flex lg:flex-col">
+                <div className="section-eyebrow">OUTLINE · 阅读导航</div>
+                <div className="mt-3 rounded-lg border border-border bg-background/80 p-3 text-xs leading-6 text-muted-foreground">
+                  <div className="flex justify-between gap-2">
+                    <span>项目</span>
+                    <span className="truncate text-right text-foreground">{project?.name ?? "未选择"}</span>
+                  </div>
+                  <div className="mt-1 flex justify-between gap-2">
+                    <span>单位</span>
+                    <span className="truncate text-right text-foreground">{project?.unit ?? "—"}</span>
+                  </div>
+                  <div className="mt-1 flex justify-between gap-2">
+                    <span>结论</span>
+                    <span className="truncate text-right text-foreground">{conclusion || "待确定"}</span>
+                  </div>
+                </div>
+                <div className="mt-4 min-h-0 flex-1 overflow-auto rounded-lg border border-border bg-background/70 p-2">
+                  {resolvedTocEntries.length ? (
+                    <div className="space-y-1">
+                      {resolvedTocEntries.slice(0, 28).map((entry, index) => (
+                        <div
+                          key={`${entry.text}-${index}`}
+                          className={`rounded-md px-2 py-1.5 text-xs leading-5 text-muted-foreground ${
+                            entry.level === 1 ? "font-semibold text-foreground" : "pl-5"
+                          }`}
+                        >
+                          {entry.text}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="px-2 py-8 text-center text-xs text-muted-foreground">生成报告后自动识别目录</div>
+                  )}
+                </div>
+              </aside>
+
+              <div
+                ref={fullscreenReportScrollRef}
+                tabIndex={0}
+                className="h-full min-h-0 overflow-y-auto overflow-x-auto bg-gradient-to-br from-slate-50 to-muted/50 p-3 outline-none overscroll-contain sm:p-6"
+                onWheelCapture={(event) => {
+                  const scroller = fullscreenReportScrollRef.current;
+                  if (!scroller || scroller.scrollHeight <= scroller.clientHeight) return;
+                  const maxScrollTop = scroller.scrollHeight - scroller.clientHeight;
+                  const nextScrollTop = Math.min(Math.max(scroller.scrollTop + event.deltaY, 0), maxScrollTop);
+                  if (nextScrollTop === scroller.scrollTop) return;
+                  event.preventDefault();
+                  scroller.scrollTop = nextScrollTop;
+                }}
+              >
+              {content ? (
+                <article className="mx-auto w-full max-w-[1120px] font-display">
+                  <WatermarkOverlay>
+                    {generating ? (
+                      <div className="bg-muted/15 p-3 sm:p-4">
+                        <div className={reportDocumentPageClasses}>
+                          <div className={reportDocumentPageInnerClasses}>
+                            <MarkdownView content={content} cursor variant="document" />
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <RichTextEditor
+                        value={content}
+                        onChange={setContent}
+                        onSelectionChange={setSelectedRewriteText}
+                        editable={!isCurrentFinalized}
+                        variant="document"
+                      />
+                    )}
+                  </WatermarkOverlay>
+                </article>
+              ) : (
+                <div className="flex h-full items-center justify-center">
+                  <EmptyState icon={FileText} title="报告将在此生成" hint="选择评估对象后，点击左侧『AI 一键生成报告』" />
+                </div>
+              )}
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
 
       <RewriteBlockDialog
         open={rewriteOpen} onOpenChange={setRewriteOpen}

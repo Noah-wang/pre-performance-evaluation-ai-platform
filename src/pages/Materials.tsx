@@ -14,7 +14,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
 } from "@/components/ui/dialog";
-import { Plus, Upload, Check, X, Trash2, FileText, Sparkles, Download, FileSearch, FolderOpen, Radar, Layers, Link2, ChevronDown, ExternalLink, AlertTriangle } from "lucide-react";
+import { Plus, Upload, Check, X, Trash2, FileText, Sparkles, Download, FileSearch, FolderOpen, Radar, Layers, Link2, ChevronDown, ExternalLink, AlertTriangle, Loader2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { StatusPill, EmptyState } from "@/components/ui-kit";
@@ -421,6 +421,7 @@ const Materials = () => {
   const [smartUploading, setSmartUploading] = useState(false);
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
   const [reviewedSelectionMode, setReviewedSelectionMode] = useState(false);
+  const [bulkDownloading, setBulkDownloading] = useState(false);
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const previewObjectUrlRef = useRef<string | null>(null);
 
@@ -790,7 +791,23 @@ const Materials = () => {
     }
   };
 
-  const onFile = async (m: Material, file: File, options: { silent?: boolean } = {}) => {
+  const indexMaterialForRag = async (materialId: string) => {
+    const { data, error } = await supabase.functions.invoke("ingest-project-knowledge", {
+      body: { materialId },
+    });
+    if (error) throw error;
+    return data as { indexed?: number; skipped?: number; failed?: number; errors?: string[] } | null;
+  };
+
+  const indexProjectForRag = async (targetProjectId: string) => {
+    const { data, error } = await supabase.functions.invoke("ingest-project-knowledge", {
+      body: { projectId: targetProjectId, limit: 500, force: false },
+    });
+    if (error) throw error;
+    return data as { indexed?: number; skipped?: number; failed?: number; errors?: string[] } | null;
+  };
+
+  const onFile = async (m: Material, file: File, options: { silent?: boolean; deferIndex?: boolean } = {}) => {
     if (!user) return false;
     const sanitizedName = safeStorageFileName(file.name || "资料文件");
     const path = `${user.id}/${m.project_id}/${m.id}-${sanitizedName}`;
@@ -814,11 +831,17 @@ const Materials = () => {
         review_note: null,
       }).eq("id", m.id);
       if (error) throw error;
-      void supabase.functions.invoke("ingest-project-knowledge", {
-        body: { materialId: m.id },
-      }).then(({ error: indexError }) => {
-        if (indexError) console.warn("material knowledge indexing failed", indexError);
-      });
+      if (!options.deferIndex) {
+        try {
+          const indexResult = await indexMaterialForRag(m.id);
+          if (!options.silent && Number(indexResult?.failed ?? 0) > 0) {
+            toast.warning("文件已上传，但正文索引不完整；已保留文件信息级索引");
+          }
+        } catch (indexError) {
+          console.warn("material knowledge indexing failed", indexError);
+          if (!options.silent) toast.warning("文件已上传，但检索索引稍后补建");
+        }
+      }
       await loadMaterials();
       if (!options.silent) toast.success("上传成功");
       return true;
@@ -830,23 +853,101 @@ const Materials = () => {
     }
   };
 
+  /**
+   * 单文件下载。
+   *
+   * 走签名链接直连虽然秒开，但 storage-js 会把 download 参数里的中文名百分号编码，
+   * 存储服务原样当作文件名返回，用户拿到的是 %E5%B9%B4 这种乱码名。所以仍由浏览器
+   * 端取回再另存，保证文件名正确；原先“点了没反应”的问题用进度提示解决。
+   */
   const downloadFile = async (m: Material) => {
     if (!m.file_path) return;
-    const { data, error } = await supabase.storage.from("project-materials").createSignedUrl(m.file_path, 60);
-    if (error) return toast.error(error.message);
+    const fileName = m.file_name || m.name || "资料文件";
+    const toastId = toast.loading(`正在下载：${fileName}`);
     try {
-      const response = await fetch(data.signedUrl);
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
+      const { data, error } = await supabase.storage
+        .from("project-materials")
+        .download(m.file_path);
+      if (error || !data) throw error ?? new Error("文件下载失败");
+      const url = URL.createObjectURL(data);
       const link = document.createElement("a");
       link.href = url;
-      link.download = m.file_name || m.name || "资料文件";
+      link.download = fileName;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-    } catch (e: any) {
-      toast.error(e?.message ?? "下载失败");
+      toast.success(`已下载：${fileName}`, { id: toastId });
+    } catch (error: any) {
+      toast.error(error?.message ?? "下载失败", { id: toastId });
+    }
+  };
+
+  /**
+   * 批量下载：打包成一个 ZIP。
+   *
+   * 连续触发多个 <a> 下载看起来更省事，但浏览器会把它判定为“自动下载多个文件”而
+   * 静默拦截，实际只落地第一个。打包成单个文件既绕开这条限制，也让用户只需确认一次。
+   */
+  const downloadFiles = async (list: Material[]) => {
+    const targets = list.filter((item) => item.file_path);
+    if (!targets.length) return toast.error("选中的资料没有可下载的文件");
+    if (targets.length === 1) return downloadFile(targets[0]);
+
+    setBulkDownloading(true);
+    const toastId = toast.loading(`正在打包 1/${targets.length}…`);
+    try {
+      const [{ default: JSZip }, { saveAs }] = await Promise.all([
+        import("jszip"),
+        import("file-saver"),
+      ]);
+      const zip = new JSZip();
+      const usedNames = new Set<string>();
+      let packed = 0;
+      const failed: string[] = [];
+
+      for (const [index, material] of targets.entries()) {
+        const fileName = material.file_name || material.name || `资料${index + 1}`;
+        toast.loading(`正在打包 ${index + 1}/${targets.length}：${fileName}`, { id: toastId });
+        try {
+          const { data, error } = await supabase.storage
+            .from("project-materials")
+            .download(material.file_path!);
+          if (error || !data) throw error ?? new Error("文件下载失败");
+          // 同名文件会互相覆盖，加序号区分。
+          let entryName = fileName;
+          if (usedNames.has(entryName)) {
+            const dot = entryName.lastIndexOf(".");
+            const base = dot > 0 ? entryName.slice(0, dot) : entryName;
+            const ext = dot > 0 ? entryName.slice(dot) : "";
+            entryName = `${base}(${index + 1})${ext}`;
+          }
+          usedNames.add(entryName);
+          zip.file(entryName, data);
+          packed += 1;
+        } catch (error) {
+          console.warn("bulk download failed", fileName, error);
+          failed.push(fileName);
+        }
+      }
+
+      if (!packed) {
+        toast.error("选中的文件都下载失败，请稍后重试", { id: toastId });
+        return;
+      }
+      toast.loading("正在生成压缩包…", { id: toastId });
+      const blob = await zip.generateAsync({ type: "blob" });
+      const stamp = new Date().toISOString().slice(0, 10);
+      saveAs(blob, `${activeProject?.name ?? "项目资料"}-资料文件-${stamp}.zip`);
+      if (failed.length) {
+        toast.warning(`已打包 ${packed}/${targets.length} 个文件；失败：${failed.slice(0, 3).join("、")}`, { id: toastId });
+      } else {
+        toast.success(`已打包 ${packed} 个文件并开始下载`, { id: toastId });
+      }
+    } catch (error: any) {
+      toast.error(error?.message ?? "打包下载失败", { id: toastId });
+    } finally {
+      setBulkDownloading(false);
     }
   };
 
@@ -933,9 +1034,9 @@ const Materials = () => {
       if (text) {
         setPreviewText(text);
       } else if (kind === "pdf") {
-        setPreviewText("当前 PDF 未提取到可复制正文；可先直接预览原文件。若服务器已配置本地 OCR，识别文本也会显示在这里。");
+        setPreviewText("当前 PDF 尚未提取到可用正文。系统会在上传后自动识别文字层；扫描版会进入受控 OCR，可稍后重新打开预览。");
       } else if (kind === "image") {
-        setPreviewText("当前图片未提取到可复制正文；可先直接预览原图。若服务器已配置本地 OCR，识别文本也会显示在这里。");
+        setPreviewText("当前图片不纳入自动正文解析；可先直接预览或下载原图查看。");
       } else if (isLegacyDocFile(fileName)) {
         setPreviewText("旧版 .doc 文件浏览器无法直接还原版式；请下载原文件查看，或后续在服务器接入 LibreOffice 转 PDF 后预览。");
       } else if (isDocxFile(fileName)) {
@@ -950,7 +1051,7 @@ const Materials = () => {
     }
   };
 
-  const appendFileToGroup = async (base: Material, file: File, options: { silent?: boolean } = {}) => {
+  const appendFileToGroup = async (base: Material, file: File, options: { silent?: boolean; deferIndex?: boolean } = {}) => {
     if (!user) return;
     const { data: inserted, error: insertError } = await supabase.from("materials").insert({
       project_id: base.project_id,
@@ -1074,7 +1175,7 @@ const Materials = () => {
     return buildLogicalMaterialList(materials);
   };
 
-  const smartUploadFile = async (file: File, options: { silent?: boolean; candidates?: Material[] } = {}) => {
+  const smartUploadFile = async (file: File, options: { silent?: boolean; candidates?: Material[]; deferIndex?: boolean } = {}) => {
     const toastId = options.silent ? undefined : toast.loading("正在识别资料类型…");
     try {
       const candidates = options.candidates ?? await ensureSmartUploadCandidates();
@@ -1085,11 +1186,11 @@ const Materials = () => {
           const fallback = await createUnclassifiedMaterialForFile(file);
           if (toastId) toast.info(`未自动匹配到标准清单，已转为「${fallback.name}」上传，后续可人工确认指标`, { id: toastId });
           if (fallback.file_path) {
-            await appendFileToGroup(fallback, file, { silent: options.silent });
+            await appendFileToGroup(fallback, file, { silent: options.silent, deferIndex: options.deferIndex });
             return { matched: false, materialName: fallback.name };
           }
-          const uploaded = await onFile(fallback, file, { silent: options.silent });
-          if (!uploaded) await appendFileToGroup(fallback, file, { silent: options.silent });
+          const uploaded = await onFile(fallback, file, { silent: options.silent, deferIndex: options.deferIndex });
+          if (!uploaded) await appendFileToGroup(fallback, file, { silent: options.silent, deferIndex: options.deferIndex });
           return { matched: false, materialName: fallback.name };
         } catch (e: any) {
           if (toastId) toast.error(e?.message ?? "未能创建待确认资料项，请手动选择标准清单项上传", { id: toastId });
@@ -1100,11 +1201,11 @@ const Materials = () => {
       const { material, score } = recommendation;
       if (toastId) toast.success(`已识别为「${material.name}」${score >= 100 ? "" : ` · 匹配度 ${score}`}`, { id: toastId });
       if (material.file_path) {
-        await appendFileToGroup(material, file, { silent: options.silent });
+        await appendFileToGroup(material, file, { silent: options.silent, deferIndex: options.deferIndex });
         return { matched: true, materialName: material.name, score };
       }
-      const uploaded = await onFile(material, file, { silent: options.silent });
-      if (!uploaded) await appendFileToGroup(material, file, { silent: options.silent });
+      const uploaded = await onFile(material, file, { silent: options.silent, deferIndex: options.deferIndex });
+      if (!uploaded) await appendFileToGroup(material, file, { silent: options.silent, deferIndex: options.deferIndex });
       return { matched: true, materialName: material.name, score };
     } catch (e: any) {
       if (toastId) toast.error(e?.message ?? "资料自动识别失败，请手动选择标准清单项上传", { id: toastId });
@@ -1126,12 +1227,21 @@ const Materials = () => {
       const candidates = await ensureSmartUploadCandidates();
       for (const file of files) {
         try {
-          const result = await smartUploadFile(file, { silent: true, candidates });
+          const result = await smartUploadFile(file, { silent: true, candidates, deferIndex: true });
           success += 1;
           if (result?.matched) matched += 1;
         } catch {
           failed += 1;
         }
+      }
+      try {
+        const indexResult = await indexProjectForRag(projectId);
+        if (Number(indexResult?.failed ?? 0) > 0) {
+          toast.warning(`已完成上传和基础索引，${indexResult?.failed} 个文件正文未完全提取`, { duration: 5000 });
+        }
+      } catch (indexError) {
+        console.warn("bulk project knowledge indexing failed", indexError);
+        toast.warning("文件已上传，项目索引将在后台或下次报告生成时自动补建");
       }
       await loadMaterials();
       toast.success(`文件夹上传完成：成功 ${success} 个，自动匹配 ${matched} 个${failed ? `，失败 ${failed} 个` : ""}`, { id: toastId });
@@ -1923,9 +2033,22 @@ const Materials = () => {
                 [{reviewedMaterials.length.toString().padStart(2, "0")}]
               </span>
               {reviewedSelectionMode && selectedFileCount > 0 && (
-                <Button size="sm" variant="destructive" onClick={() => deleteUploadedFiles(selectedFiles)}>
-                  <Trash2 className="h-3.5 w-3.5" />删除选中（{selectedFileCount}）
-                </Button>
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={bulkDownloading}
+                    onClick={() => downloadFiles(selectedFiles)}
+                  >
+                    {bulkDownloading
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      : <Download className="h-3.5 w-3.5" />}
+                    下载选中（{selectedFileCount}）
+                  </Button>
+                  <Button size="sm" variant="destructive" onClick={() => deleteUploadedFiles(selectedFiles)}>
+                    <Trash2 className="h-3.5 w-3.5" />删除选中（{selectedFileCount}）
+                  </Button>
+                </>
               )}
               <Button
                 size="sm"
@@ -2107,14 +2230,14 @@ const Materials = () => {
           setPreviewKind("text");
         }
       }}>
-        <DialogContent className="flex h-[88vh] max-h-[860px] w-[calc(100vw-2rem)] max-w-5xl flex-col overflow-hidden p-0">
+        <DialogContent className="flex h-[94vh] w-[calc(100vw-1rem)] max-w-[96vw] flex-col overflow-hidden p-0 sm:w-[96vw]">
           <DialogHeader className="border-b border-border px-5 py-4">
             <DialogTitle className="flex min-w-0 items-center gap-2 font-display text-xl">
               <FileSearch className="h-5 w-5 shrink-0 text-accent" />
               <span className="truncate">文件预览 · {previewing?.file_name ?? previewing?.name}</span>
             </DialogTitle>
           </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-hidden bg-muted/20 p-4">
+          <div className="min-h-0 flex-1 overflow-hidden bg-muted/20 p-3 sm:p-5">
             <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-white shadow-sm">
               <div className="flex items-center justify-between gap-3 border-b border-border bg-card/80 px-4 py-2.5">
                 <div className="min-w-0 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
@@ -2158,10 +2281,10 @@ const Materials = () => {
                       <iframe
                         title={previewing?.file_name ?? previewing?.name ?? "PDF 预览"}
                         src={`${previewUrl}#toolbar=1&navpanes=0`}
-                        className="min-h-[560px] flex-1 rounded border-0 bg-white shadow-sm"
+                        className="min-h-[72vh] flex-1 rounded border-0 bg-white shadow-sm"
                       />
                     ) : (
-                      <div className="flex min-h-[460px] flex-1 flex-col items-center justify-center rounded-lg border border-dashed border-border bg-white px-8 py-12 text-center shadow-sm">
+                      <div className="flex min-h-[64vh] flex-1 flex-col items-center justify-center rounded-lg border border-dashed border-border bg-white px-8 py-12 text-center shadow-sm">
                         <FileText className="h-10 w-10 text-muted-foreground" />
                         <div className="mt-4 font-display text-lg font-semibold text-foreground">暂无可显示的 PDF 画面</div>
                         <div className="mt-2 max-w-xl text-sm leading-7 text-muted-foreground">
@@ -2189,7 +2312,7 @@ const Materials = () => {
                     />
                   </div>
                 ) : (
-                  <div className="mx-auto min-h-full w-full max-w-[794px] rounded-sm bg-white px-6 py-8 shadow-sm sm:px-12 sm:py-12">
+                  <div className="mx-auto min-h-full w-full max-w-[960px] rounded-sm bg-white px-6 py-8 shadow-sm sm:px-14 sm:py-12">
                     {previewLoading ? (
                       <div className="text-sm text-muted-foreground">正在读取文件正文…</div>
                     ) : previewing && isLegacyDocFile(previewing.file_name ?? previewing.name) ? (

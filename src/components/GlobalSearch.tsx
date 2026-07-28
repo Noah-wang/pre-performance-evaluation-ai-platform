@@ -45,7 +45,7 @@ const QUICK_NAV: SearchHit[] = [
   { id: "nav-mat",      type: "material", title: "资料收集审核",   url: "/materials" },
   { id: "nav-eval",     type: "plan",     title: "评估指标体系",   url: "/evaluation-system" },
   { id: "nav-field",    type: "field",    title: "现场调研记录",   url: "/field-research" },
-  { id: "nav-meet",     type: "meeting",  title: "预评估与正式评估", url: "/evaluations" },
+  { id: "nav-meet",     type: "meeting",  title: "预评估",         url: "/evaluations" },
   { id: "nav-rep",      type: "report",   title: "评估报告（AI）", url: "/reports" },
   { id: "nav-arch",     type: "report",   title: "结果应用与项目库", url: "/archive" },
 ];

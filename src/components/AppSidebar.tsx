@@ -38,8 +38,9 @@ const groups = [
       { title: "评估指标体系", url: "/evaluation-system", icon: Layers, code: "04A" },
       { title: "绩效目标库", url: "/goal-library", icon: Library, code: "04B" },
       { title: "现场调研记录", url: "/field-research", icon: ClipboardList, code: "05" },
-      { title: "预评估与正式评估", url: "/evaluations", icon: ScrollText, code: "06" },
-      { title: "专家打分汇总", url: "/expert-scoring", icon: Award, code: "06A" },
+      // 预评估要参考专家打分结果，所以排在打分汇总之后。
+      { title: "专家打分汇总", url: "/expert-scoring", icon: Award, code: "06" },
+      { title: "预评估", url: "/evaluations", icon: ScrollText, code: "06A" },
     ],
   },
   {

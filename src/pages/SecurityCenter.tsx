@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
@@ -8,12 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { EmptyState, SectionHeader, StatTile, StatusPill } from "@/components/ui-kit";
-import { ArrowLeft, EyeOff, FolderKanban, KeyRound, Plus, RefreshCw, ShieldAlert, ShieldCheck, Trash2, Users2 } from "lucide-react";
+import { ArrowLeft, EyeOff, Filter, FolderKanban, KeyRound, Pencil, RefreshCw, Save, ShieldAlert, ShieldCheck, Trash2, Users2, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -43,6 +45,7 @@ interface ProjectRow {
   id: string;
   name: string;
   unit: string | null;
+  created_by: string | null;
 }
 
 interface ProjectMemberRow {
@@ -54,16 +57,40 @@ interface ProjectMemberRow {
   created_at: string;
 }
 
+interface ColumnFilters {
+  user: string;
+  organization: string;
+  contact: string;
+  role: AppRole | "all";
+  projects: string;
+}
+
 const ROLE_LABEL: Record<AppRole, string> = {
   admin: "管理员",
   group_member: "工作组成员",
   expert: "专家",
 };
 
+const ROLE_OPTIONS: AppRole[] = ["admin", "group_member", "expert"];
+
+const ROLE_PRIORITY: Record<AppRole, number> = {
+  admin: 1,
+  group_member: 2,
+  expert: 3,
+};
+
 const ROLE_TONE: Record<AppRole, "danger" | "info" | "gold"> = {
   admin: "danger",
   group_member: "info",
   expert: "gold",
+};
+
+const EMPTY_FILTERS: ColumnFilters = {
+  user: "",
+  organization: "",
+  contact: "",
+  role: "all",
+  projects: "",
 };
 
 const MATRIX_ROWS = [
@@ -97,15 +124,10 @@ const AUDIT_OBJECTS = [
   "share_link_views",
 ];
 
-const maskPhone = (value: string | null) => {
-  if (!value) return "未填写";
-  if (value.length < 7) return value;
-  return `${value.slice(0, 3)}****${value.slice(-4)}`;
-};
-
-const contactLabel = (email: string | null | undefined, phone: string | null) => {
-  if (email) return email;
-  return maskPhone(phone);
+const pickPrimaryRole = (roleList: AppRole[]): AppRole => {
+  if (roleList.length === 0) return "group_member";
+  if (roleList.length > 1) return "admin";
+  return [...roleList].sort((a, b) => ROLE_PRIORITY[a] - ROLE_PRIORITY[b])[0];
 };
 
 const SecurityCenter = () => {
@@ -118,11 +140,12 @@ const SecurityCenter = () => {
   const [projectMembers, setProjectMembers] = useState<ProjectMemberRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
-  const [assignmentSearch, setAssignmentSearch] = useState("");
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [selectedUserId, setSelectedUserId] = useState("");
-  const [selectedProjectRole, setSelectedProjectRole] = useState<"group_member" | "expert">("group_member");
-  const [assigning, setAssigning] = useState(false);
+  const [columnFilters, setColumnFilters] = useState<ColumnFilters>(EMPTY_FILTERS);
+  const [editingUserId, setEditingUserId] = useState("");
+  const [draftProfile, setDraftProfile] = useState<Profile | null>(null);
+  const [draftRole, setDraftRole] = useState<AppRole>("group_member");
+  const [projectPickerUserId, setProjectPickerUserId] = useState("");
+  const [projectPickerSearch, setProjectPickerSearch] = useState("");
   const [resetOpen, setResetOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<{ userId: string; displayName: string } | null>(null);
   const [resetPassword, setResetPassword] = useState("");
@@ -139,7 +162,7 @@ const SecurityCenter = () => {
     ] = await Promise.all([
       supabase.from("profiles").select("user_id,display_name,organization,phone").order("created_at", { ascending: false }),
       supabase.from("user_roles").select("id,user_id,role").order("created_at", { ascending: false }),
-      supabase.from("projects").select("id,name,unit").order("created_at", { ascending: false }),
+      supabase.from("projects").select("id,name,unit,created_by").order("created_at", { ascending: false }),
       (supabase as any).from("project_members").select("id,project_id,user_id,role,source,created_at").order("created_at", { ascending: false }),
       (supabase as any).rpc("get_user_directory"),
     ]);
@@ -155,12 +178,33 @@ const SecurityCenter = () => {
     const nextProjects = (projectData as ProjectRow[]) ?? [];
     setProjects(nextProjects);
     setProjectMembers((memberData as ProjectMemberRow[]) ?? []);
-    setSelectedProjectId((current) => current || nextProjects[0]?.id || "");
   };
 
   useEffect(() => {
     if (isAdmin) load();
   }, [isAdmin]);
+
+  const profileMap = useMemo(() => new Map(profiles.map((profile) => [profile.user_id, profile])), [profiles]);
+  const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+  const projectMembersByUser = useMemo(() => {
+    const map = new Map<string, ProjectMemberRow[]>();
+    projectMembers.forEach((member) => {
+      const next = map.get(member.user_id) ?? [];
+      next.push(member);
+      map.set(member.user_id, next);
+    });
+    return map;
+  }, [projectMembers]);
+  const createdProjectsByUser = useMemo(() => {
+    const map = new Map<string, ProjectRow[]>();
+    projects.forEach((project) => {
+      if (!project.created_by) return;
+      const next = map.get(project.created_by) ?? [];
+      next.push(project);
+      map.set(project.created_by, next);
+    });
+    return map;
+  }, [projects]);
 
   const rows = useMemo(() => {
     const roleMap = new Map<string, Set<AppRole>>();
@@ -173,125 +217,207 @@ const SecurityCenter = () => {
     return profiles.map((profile) => {
       const roleSet = roleMap.get(profile.user_id) ?? new Set<AppRole>(["group_member"]);
       const roleList = Array.from(roleSet);
+      const primaryRole = pickPrimaryRole(roleList);
+      const memberProjects = projectMembersByUser.get(profile.user_id) ?? [];
+      const createdProjects = createdProjectsByUser.get(profile.user_id) ?? [];
+      const projectIds = new Set<string>();
+      memberProjects.forEach((member) => projectIds.add(member.project_id));
+      createdProjects.forEach((project) => projectIds.add(project.id));
+      const accessibleProjects = Array.from(projectIds)
+        .map((projectId) => projectMap.get(projectId))
+        .filter(Boolean) as ProjectRow[];
       return {
         ...profile,
         email: emailMap.get(profile.user_id) ?? null,
         roleList,
+        primaryRole,
+        accessibleProjects,
+        memberProjects,
+        createdProjects,
       };
     }).filter((row) => {
-      if (!search.trim()) return true;
-      const kw = search.trim().toLowerCase();
-      return [
+      const globalKw = search.trim().toLowerCase();
+      const haystack = [
         row.display_name ?? "",
         row.organization ?? "",
         row.email ?? "",
+        row.phone ?? "",
         row.user_id,
         row.roleList.map((item) => ROLE_LABEL[item]).join(" "),
-      ].join(" ").toLowerCase().includes(kw);
+        row.accessibleProjects.map((project) => project.name).join(" "),
+      ].join(" ").toLowerCase();
+      if (globalKw && !haystack.includes(globalKw)) return false;
+      if (columnFilters.user.trim()) {
+        const kw = columnFilters.user.trim().toLowerCase();
+        if (![row.display_name ?? "", row.user_id].join(" ").toLowerCase().includes(kw)) return false;
+      }
+      if (columnFilters.organization.trim()) {
+        const kw = columnFilters.organization.trim().toLowerCase();
+        if (!(row.organization ?? "").toLowerCase().includes(kw)) return false;
+      }
+      if (columnFilters.contact.trim()) {
+        const kw = columnFilters.contact.trim().toLowerCase();
+        if (![row.email ?? "", row.phone ?? ""].join(" ").toLowerCase().includes(kw)) return false;
+      }
+      if (columnFilters.role !== "all" && row.primaryRole !== columnFilters.role) return false;
+      if (columnFilters.projects.trim()) {
+        const kw = columnFilters.projects.trim().toLowerCase();
+        if (!row.accessibleProjects.map((project) => project.name).join(" ").toLowerCase().includes(kw)) return false;
+      }
+      return true;
     });
-  }, [profiles, roles, search, userDirectory]);
+  }, [columnFilters, createdProjectsByUser, profiles, projectMap, projectMembersByUser, roles, search, userDirectory]);
 
-  const stats = useMemo(() => ({
-    users: profiles.length,
-    admins: new Set(roles.filter((item) => item.role === "admin").map((item) => item.user_id)).size,
-    experts: new Set(roles.filter((item) => item.role === "expert").map((item) => item.user_id)).size,
-    members: new Set(roles.filter((item) => item.role === "group_member").map((item) => item.user_id)).size,
-  }), [profiles.length, roles]);
+  const stats = useMemo(() => {
+    const primaryRoleByUser = new Map<string, AppRole>();
+    profiles.forEach((profile) => {
+      const userRoles = roles.filter((item) => item.user_id === profile.user_id).map((item) => item.role);
+      primaryRoleByUser.set(profile.user_id, pickPrimaryRole(userRoles));
+    });
+    return {
+      users: profiles.length,
+      admins: Array.from(primaryRoleByUser.values()).filter((role) => role === "admin").length,
+      experts: Array.from(primaryRoleByUser.values()).filter((role) => role === "expert").length,
+      members: Array.from(primaryRoleByUser.values()).filter((role) => role === "group_member").length,
+    };
+  }, [profiles, roles]);
 
-  const profileMap = useMemo(() => new Map(profiles.map((profile) => [profile.user_id, profile])), [profiles]);
-  const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+  const applyAccountRole = async (userId: string, role: AppRole) => {
+    const { error } = await (supabase as any).rpc("set_user_role", {
+      target_user_id: userId,
+      target_role: role,
+    });
+    if (error) {
+      const missingRpc = /set_user_role|function .* does not exist|Could not find the function/i.test(error.message);
+      if (!missingRpc) return toast.error(error.message);
 
-  const projectAssignmentRows = useMemo(() => {
-    const kw = assignmentSearch.trim().toLowerCase();
-    return projectMembers
-      .map((member) => ({
-        ...member,
-        project: projectMap.get(member.project_id),
-        profile: profileMap.get(member.user_id),
-      }))
-      .filter((row) => {
-        if (!kw) return true;
-        return [
-          row.project?.name ?? "",
-          row.project?.unit ?? "",
-          row.profile?.display_name ?? "",
-          row.profile?.organization ?? "",
-          row.user_id,
-          ROLE_LABEL[row.role],
-        ].join(" ").toLowerCase().includes(kw);
-      });
-  }, [assignmentSearch, profileMap, projectMap, projectMembers]);
+      const { error: deleteError } = await supabase.from("user_roles").delete().eq("user_id", userId);
+      if (deleteError) return toast.error(deleteError.message);
+      const { error: insertError } = await supabase.from("user_roles").insert({ user_id: userId, role });
+      if (insertError) return toast.error(insertError.message);
+    }
+    if (role !== "admin") {
+      await (supabase as any)
+        .from("project_members")
+        .update({ role: role === "expert" ? "expert" : "group_member" })
+        .eq("user_id", userId);
+    }
+    return true;
+  };
 
-  const selectedProjectMembers = useMemo(
-    () => projectMembers.filter((item) => item.project_id === selectedProjectId),
-    [projectMembers, selectedProjectId],
-  );
+  const saveProfile = async (target: Profile, showToast = true) => {
+    const payload = {
+      display_name: target.display_name ?? "",
+      organization: target.organization ?? "",
+      phone: target.phone ?? "",
+    };
+    const { error } = await (supabase as any).rpc("set_user_profile", {
+      target_user_id: target.user_id,
+      target_display_name: payload.display_name,
+      target_organization: payload.organization,
+      target_phone: payload.phone,
+    });
+    if (error) {
+      const missingRpc = /set_user_profile|function .* does not exist|Could not find the function/i.test(error.message);
+      if (!missingRpc) {
+        toast.error(error.message);
+        return false;
+      }
+      const { error: updateError } = await supabase
+        .from("profiles")
+        .update(payload)
+        .eq("user_id", target.user_id);
+      if (updateError) {
+        toast.error(updateError.message);
+        return false;
+      }
+    }
+    if (showToast) {
+      toast.success("用户信息已保存");
+      load();
+    }
+    return true;
+  };
 
-  const assignProject = async () => {
-    if (!selectedProjectId || !selectedUserId) {
-      toast.error("请选择项目和账号");
+  const updateColumnFilter = <K extends keyof ColumnFilters>(key: K, value: ColumnFilters[K]) => {
+    setColumnFilters((current) => ({ ...current, [key]: value }));
+  };
+
+  const clearColumnFilters = () => setColumnFilters(EMPTY_FILTERS);
+
+  const hasColumnFilters = Object.values(columnFilters).some((value) => value !== "" && value !== "all");
+
+  const startEditUser = (row: Profile & { primaryRole: AppRole }) => {
+    setEditingUserId(row.user_id);
+    setDraftProfile({
+      user_id: row.user_id,
+      display_name: row.display_name ?? "",
+      organization: row.organization ?? "",
+      phone: row.phone ?? "",
+    });
+    setDraftRole(row.primaryRole);
+  };
+
+  const cancelEditUser = () => {
+    setEditingUserId("");
+    setDraftProfile(null);
+  };
+
+  const updateDraftProfile = (patch: Partial<Pick<Profile, "display_name" | "organization" | "phone">>) => {
+    setDraftProfile((current) => (current ? { ...current, ...patch } : current));
+  };
+
+  const saveEditedUser = async (currentRole: AppRole) => {
+    if (!draftProfile) return;
+    if (draftProfile.user_id === user?.id && draftRole !== "admin") {
+      toast.error("不能把当前登录的管理员账号改成普通角色");
       return;
     }
-    setAssigning(true);
-    const { error } = await (supabase as any)
-      .from("project_members")
-      .upsert({
-        project_id: selectedProjectId,
-        user_id: selectedUserId,
-        role: selectedProjectRole,
-        source: "admin",
-        created_by: user?.id ?? null,
-      }, { onConflict: "project_id,user_id" });
-    setAssigning(false);
-    if (error) return toast.error(error.message);
-    const profile = profileMap.get(selectedUserId);
-    const project = projectMap.get(selectedProjectId);
-    toast.success(`已将 ${profile?.display_name || "该账号"} 分配到 ${project?.name || "项目"}`);
-    setSelectedUserId("");
+    const profileSaved = await saveProfile(draftProfile, false);
+    if (!profileSaved) return;
+    if (draftRole !== currentRole) {
+      const roleSaved = await applyAccountRole(draftProfile.user_id, draftRole);
+      if (!roleSaved) return;
+    }
+    toast.success("账号信息已保存");
+    cancelEditUser();
     load();
   };
 
-  const removeProjectMember = async (member: ProjectMemberRow) => {
-    const profile = profileMap.get(member.user_id);
-    const project = projectMap.get(member.project_id);
-    const ok = await confirm({
-      title: "移除项目权限？",
-      description: `移除后，${profile?.display_name || "该账号"} 将不能再查看「${project?.name || "该项目"}」。`,
-      destructive: true,
-      confirmText: "移除",
-    });
-    if (!ok) return;
-    const { error } = await (supabase as any).from("project_members").delete().eq("id", member.id);
-    if (error) return toast.error(error.message);
-    toast.success("项目权限已移除");
-    load();
+  const projectRoleForUser = (userId: string): "group_member" | "expert" => {
+    const role = pickPrimaryRole(roles.filter((item) => item.user_id === userId).map((item) => item.role));
+    return role === "expert" ? "expert" : "group_member";
   };
 
-  const grantRole = async (userId: string, role: AppRole) => {
-    const exists = roles.some((item) => item.user_id === userId && item.role === role);
-    if (exists) return toast.info("该角色已存在");
-    const { error } = await supabase.from("user_roles").insert({ user_id: userId, role });
-    if (error) return toast.error(error.message);
-    toast.success(`已授予${ROLE_LABEL[role]}`);
-    load();
-  };
-
-  const revokeRole = async (userId: string, role: AppRole) => {
-    const ownedRoles = roles.filter((item) => item.user_id === userId);
-    if (ownedRoles.length <= 1) {
-      toast.error("至少保留一个角色");
+  const toggleUserProject = async (targetUserId: string, projectId: string, checked: boolean) => {
+    const project = projectMap.get(projectId);
+    if (!project) return;
+    if (project.created_by === targetUserId && !checked) {
+      toast.info("用户自己创建的项目会自动保留在可见项目里");
       return;
     }
-    const ok = await confirm({
-      title: `移除${ROLE_LABEL[role]}？`,
-      description: "该用户将失去对应菜单和数据权限，请确认。",
-      destructive: true,
-      confirmText: "移除角色",
-    });
-    if (!ok) return;
-    const { error } = await supabase.from("user_roles").delete().eq("user_id", userId).eq("role", role);
-    if (error) return toast.error(error.message);
-    toast.success(`已移除${ROLE_LABEL[role]}`);
+
+    if (checked) {
+      const { error } = await (supabase as any)
+        .from("project_members")
+        .upsert({
+          project_id: projectId,
+          user_id: targetUserId,
+          role: projectRoleForUser(targetUserId),
+          source: "admin",
+          created_by: user?.id ?? null,
+        }, { onConflict: "project_id,user_id" });
+      if (error) return toast.error(error.message);
+      toast.success("项目已分配");
+    } else {
+      const { error } = await (supabase as any)
+        .from("project_members")
+        .delete()
+        .eq("project_id", projectId)
+        .eq("user_id", targetUserId);
+      if (error) return toast.error(error.message);
+      toast.success("项目已移除");
+    }
     load();
   };
 
@@ -389,6 +515,39 @@ const SecurityCenter = () => {
     setResetPassword("");
   };
 
+  const projectPickerProfile = projectPickerUserId ? profileMap.get(projectPickerUserId) : null;
+  const projectPickerMembers = projectPickerUserId ? (projectMembersByUser.get(projectPickerUserId) ?? []) : [];
+  const projectPickerAssignedIds = new Set(projectPickerMembers.map((member) => member.project_id));
+  const projectPickerCreatedIds = new Set(
+    projectPickerUserId
+      ? (createdProjectsByUser.get(projectPickerUserId) ?? []).map((project) => project.id)
+      : [],
+  );
+  const projectPickerSelectedIds = new Set([...projectPickerAssignedIds, ...projectPickerCreatedIds]);
+  const visibleProjectPickerProjects = projects.filter((project) => {
+    const kw = projectPickerSearch.trim().toLowerCase();
+    if (!kw) return true;
+    return [project.name, project.unit ?? ""].join(" ").toLowerCase().includes(kw);
+  });
+
+  const filterButton = (active: boolean, children: ReactNode) => (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant={active ? "secondary" : "ghost"}
+          size="icon"
+          className="h-7 w-7"
+          title="筛选"
+        >
+          <Filter className="h-3.5 w-3.5" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72">
+        {children}
+      </PopoverContent>
+    </Popover>
+  );
+
   if (authLoading) return null;
 
   if (!isAdmin) {
@@ -474,258 +633,318 @@ const SecurityCenter = () => {
       </div>
 
       <Card className="surface-card p-4">
-        <SectionHeader eyebrow="USER ACCESS" title="用户角色分配" icon={KeyRound} />
+        <SectionHeader
+          eyebrow="USER ACCESS"
+          title="用户与项目权限"
+          icon={KeyRound}
+          actions={
+            <div className="text-xs text-muted-foreground">
+              管理员可查看全部；工作组成员和专家只查看被分配或自己创建的项目。
+            </div>
+          }
+        />
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜索姓名 / 单位 / 用户 ID / 角色"
+            placeholder="全局搜索姓名 / 单位 / 邮箱 / 用户 ID / 角色 / 项目"
             className="max-w-md"
           />
           <div className="text-xs text-muted-foreground font-mono">{rows.length} / {profiles.length} 人</div>
+          {hasColumnFilters && (
+            <Button variant="outline" size="sm" className="h-9" onClick={clearColumnFilters}>
+              清空表头筛选
+            </Button>
+          )}
         </div>
-        {rows.length === 0 ? (
+        {/*
+          表头筛选框挂在这张表的 TableHead 里。如果筛不到结果就把整张表换成空状态，
+          正在输入的筛选框会随表一起卸载——表现为“打第二个字母时输入框消失、页面跳回
+          顶部”。因此只有在完全没有数据时才隐藏表格，筛选无结果时保留表头，把提示放在
+          表体里。
+        */}
+        {rows.length === 0 && !hasColumnFilters ? (
           <EmptyState icon={Users2} title="暂无可管理用户" hint={loading ? "正在加载…" : "当前还没有 profiles 数据"} />
         ) : (
           <div className="overflow-x-auto">
-            <Table>
+            <Table className="min-w-[1180px] table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>用户</TableHead>
-                  <TableHead>所属单位</TableHead>
-                  <TableHead>联系方式</TableHead>
-                  <TableHead>当前角色</TableHead>
-                  <TableHead>授予角色</TableHead>
-                  <TableHead className="w-40">密码</TableHead>
-                  <TableHead className="w-28 text-right">删除用户</TableHead>
+                  <TableHead className="w-[210px]">
+                    <div className="flex items-center gap-1">
+                      用户
+                      {filterButton(Boolean(columnFilters.user), (
+                        <div className="space-y-2">
+                          <Label>筛选用户</Label>
+                          <Input
+                            value={columnFilters.user}
+                            onChange={(event) => updateColumnFilter("user", event.target.value)}
+                            placeholder="姓名 / 用户 ID"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[160px]">
+                    <div className="flex items-center gap-1">
+                      所属单位
+                      {filterButton(Boolean(columnFilters.organization), (
+                        <div className="space-y-2">
+                          <Label>筛选单位</Label>
+                          <Input
+                            value={columnFilters.organization}
+                            onChange={(event) => updateColumnFilter("organization", event.target.value)}
+                            placeholder="输入单位名称"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[230px]">
+                    <div className="flex items-center gap-1">
+                      联系方式
+                      {filterButton(Boolean(columnFilters.contact), (
+                        <div className="space-y-2">
+                          <Label>筛选联系方式</Label>
+                          <Input
+                            value={columnFilters.contact}
+                            onChange={(event) => updateColumnFilter("contact", event.target.value)}
+                            placeholder="邮箱 / 电话"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[160px]">
+                    <div className="flex items-center gap-1">
+                      账号角色
+                      {filterButton(columnFilters.role !== "all", (
+                        <div className="space-y-2">
+                          <Label>筛选角色</Label>
+                          <Select value={columnFilters.role} onValueChange={(value) => updateColumnFilter("role", value as ColumnFilters["role"])}>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="all">全部角色</SelectItem>
+                              {ROLE_OPTIONS.map((role) => (
+                                <SelectItem key={`role-filter-${role}`} value={role}>{ROLE_LABEL[role]}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ))}
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[300px]">
+                    <div className="flex items-center gap-1">
+                      所分配项目
+                      {filterButton(Boolean(columnFilters.projects), (
+                        <div className="space-y-2">
+                          <Label>筛选项目</Label>
+                          <Input
+                            value={columnFilters.projects}
+                            onChange={(event) => updateColumnFilter("projects", event.target.value)}
+                            placeholder="输入项目名称"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[240px] text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      {hasColumnFilters && (
+                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={clearColumnFilters}>
+                          清空筛选
+                        </Button>
+                      )}
+                      操作
+                    </div>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((row) => (
-                  <TableRow key={row.user_id}>
-                    <TableCell>
-                      <div className="font-medium">{row.display_name || "未命名用户"}</div>
-                      <div className="font-mono text-[10px] text-muted-foreground">{row.user_id}</div>
-                    </TableCell>
-                    <TableCell>{row.organization || "未填写"}</TableCell>
-                    <TableCell className="font-mono text-xs">{contactLabel(row.email, row.phone)}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1.5">
-                        {row.roleList.map((role) => (
-                          <button
-                            key={`${row.user_id}-${role}`}
-                            onClick={() => revokeRole(row.user_id, role)}
-                            className="text-left"
-                            type="button"
-                          >
-                            <StatusPill tone={ROLE_TONE[role]} dot={false} className="cursor-pointer">
-                              {ROLE_LABEL[role]}
-                            </StatusPill>
-                          </button>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-2">
-                        {(["admin", "group_member", "expert"] as AppRole[]).map((role) => (
-                          <Button
-                            key={`${row.user_id}-grant-${role}`}
-                            size="sm"
-                            variant={row.roleList.includes(role) ? "secondary" : "outline"}
-                            className="h-7"
-                            disabled={row.roleList.includes(role)}
-                            onClick={() => grantRole(row.user_id, role)}
-                          >
-                            授予{ROLE_LABEL[role]}
-                          </Button>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8"
-                        onClick={() => openResetPassword(row.user_id, row.display_name || "未命名用户")}
-                      >
-                        重置密码
-                      </Button>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        className="h-8"
-                        disabled={row.user_id === user?.id}
-                        onClick={() => deleteUser(row.user_id, row.display_name || "未命名用户")}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        删除
-                      </Button>
+                {rows.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={8} className="h-24 text-center text-sm text-muted-foreground">
+                      没有符合当前筛选条件的用户，请调整或清空表头筛选。
                     </TableCell>
                   </TableRow>
-                ))}
+                )}
+                {rows.map((row) => {
+                  const isCurrentUser = row.user_id === user?.id;
+                  const isAdminRow = row.primaryRole === "admin";
+                  const isEditing = editingUserId === row.user_id;
+                  return (
+                    <TableRow key={row.user_id} className={isEditing ? "bg-muted/20" : "h-[72px]"}>
+                      <TableCell className="align-middle">
+                        {isEditing && draftProfile ? (
+                          <div className="space-y-1">
+                            <Input
+                              value={draftProfile.display_name ?? ""}
+                              onChange={(event) => updateDraftProfile({ display_name: event.target.value })}
+                              placeholder="姓名"
+                              className="h-8"
+                            />
+                            <div className="truncate font-mono text-[10px] text-muted-foreground">{row.user_id}</div>
+                          </div>
+                        ) : (
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{row.display_name || "未填写姓名"}</div>
+                            <div className="truncate font-mono text-[10px] text-muted-foreground">{row.user_id}</div>
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="align-middle">
+                        {isEditing && draftProfile ? (
+                          <Input
+                            value={draftProfile.organization ?? ""}
+                            onChange={(event) => updateDraftProfile({ organization: event.target.value })}
+                            placeholder="所属单位"
+                            className="h-8"
+                          />
+                        ) : (
+                          <div className="truncate text-sm">{row.organization || "未填写"}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="align-middle">
+                        {isEditing && draftProfile ? (
+                          <div className="space-y-1">
+                            <div className="truncate text-xs font-mono text-muted-foreground">{row.email || "未绑定邮箱"}</div>
+                            <Input
+                              value={draftProfile.phone ?? ""}
+                              onChange={(event) => updateDraftProfile({ phone: event.target.value })}
+                              placeholder="联系电话"
+                              className="h-8"
+                            />
+                          </div>
+                        ) : (
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="truncate text-xs font-mono">{row.email || "未绑定邮箱"}</div>
+                            <div className="truncate text-xs text-muted-foreground">{row.phone || "未填写电话"}</div>
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="align-middle">
+                        {isEditing ? (
+                          <Select
+                            value={draftRole}
+                            disabled={isCurrentUser}
+                            onValueChange={(value) => setDraftRole(value as AppRole)}
+                          >
+                            <SelectTrigger className="h-8">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {ROLE_OPTIONS.map((role) => (
+                                <SelectItem key={`${row.user_id}-role-${role}`} value={role}>
+                                  {ROLE_LABEL[role]}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <StatusPill tone={ROLE_TONE[row.primaryRole]} dot={false}>
+                            {ROLE_LABEL[row.primaryRole]}
+                          </StatusPill>
+                        )}
+                      </TableCell>
+                      <TableCell className="align-middle">
+                        <div className="min-w-0">
+                          {isAdminRow ? (
+                            <StatusPill tone="danger" dot={false}>管理员默认可见全部项目</StatusPill>
+                          ) : row.accessibleProjects.length === 0 ? (
+                            <span className="text-xs text-muted-foreground">暂未分配项目</span>
+                          ) : (
+                            <TooltipProvider delayDuration={150}>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button type="button" className="cursor-default">
+                                    <StatusPill tone="info" dot={false}>
+                                      已分配 {row.accessibleProjects.length} 个项目
+                                    </StatusPill>
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" align="start" className="w-80 max-w-[80vw] p-0">
+                                  <div className="border-b border-border px-3 py-2 text-xs font-medium">
+                                    已分配项目清单
+                                  </div>
+                                  <div className="max-h-64 overflow-y-auto p-2">
+                                    {row.accessibleProjects.map((project, index) => (
+                                      <div key={`${row.user_id}-tooltip-project-${project.id}`} className="rounded-md px-2 py-1.5 text-xs">
+                                        <div className="line-clamp-2 font-medium">
+                                          {index + 1}. {project.name}
+                                        </div>
+                                        <div className="mt-0.5 truncate text-muted-foreground">
+                                          {project.unit || "未填写单位"}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          )}
+                          {isEditing && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="mt-2 h-8"
+                              disabled={isAdminRow}
+                              onClick={() => setProjectPickerUserId(row.user_id)}
+                            >
+                              <FolderKanban className="h-3.5 w-3.5" />
+                              编辑项目
+                            </Button>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="align-middle text-right">
+                        {isEditing ? (
+                          <div className="flex justify-end gap-2">
+                            <Button size="sm" variant="hero" className="h-8" onClick={() => saveEditedUser(row.primaryRole)}>
+                              <Save className="h-3.5 w-3.5" />
+                              保存
+                            </Button>
+                            <Button size="sm" variant="outline" className="h-8" onClick={cancelEditUser}>
+                              <X className="h-3.5 w-3.5" />
+                              取消
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="flex justify-end gap-2">
+                            <Button size="sm" variant="outline" className="h-8" onClick={() => startEditUser(row)}>
+                              <Pencil className="h-3.5 w-3.5" />
+                              编辑
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8"
+                              onClick={() => openResetPassword(row.user_id, row.display_name || "未命名用户")}
+                            >
+                              重置密码
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              className="h-8"
+                              disabled={isCurrentUser}
+                              onClick={() => deleteUser(row.user_id, row.display_name || "未命名用户")}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              删除
+                            </Button>
+                          </div>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
         )}
-      </Card>
-
-      <Card className="surface-card p-4">
-        <SectionHeader
-          eyebrow="PROJECT ACCESS"
-          title="项目权限分配"
-          icon={FolderKanban}
-          actions={
-            <div className="text-xs text-muted-foreground">
-              管理员可查看全部；工作组成员和专家只看这里分配给自己的项目。
-            </div>
-          }
-        />
-        <div className="grid gap-3 rounded-xl border border-border bg-muted/20 p-3 lg:grid-cols-[1.2fr_1fr_180px_auto]">
-          <div className="space-y-1.5">
-            <Label>选择项目</Label>
-            <Select value={selectedProjectId} onValueChange={setSelectedProjectId}>
-              <SelectTrigger>
-                <SelectValue placeholder="请选择项目" />
-              </SelectTrigger>
-              <SelectContent>
-                {projects.map((project) => (
-                  <SelectItem key={project.id} value={project.id}>
-                    {project.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label>选择账号</Label>
-            <Select value={selectedUserId} onValueChange={setSelectedUserId}>
-              <SelectTrigger>
-                <SelectValue placeholder="请选择已注册账号" />
-              </SelectTrigger>
-              <SelectContent>
-                {profiles.map((profile) => (
-                  <SelectItem key={profile.user_id} value={profile.user_id}>
-                    {profile.display_name || "未命名用户"}{profile.organization ? ` · ${profile.organization}` : ""}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label>项目身份</Label>
-            <Select value={selectedProjectRole} onValueChange={(value: "group_member" | "expert") => setSelectedProjectRole(value)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="group_member">工作组成员</SelectItem>
-                <SelectItem value="expert">专家</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-end">
-            <Button variant="hero" className="w-full" onClick={assignProject} disabled={assigning || !selectedProjectId || !selectedUserId}>
-              <Plus className="h-4 w-4" />
-              {assigning ? "分配中…" : "分配项目"}
-            </Button>
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-4 xl:grid-cols-[360px_1fr]">
-          <div className="rounded-xl border border-border bg-card/60 p-3">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold">当前项目成员</div>
-                <div className="text-xs text-muted-foreground">
-                  {projectMap.get(selectedProjectId)?.name ?? "请选择项目"}
-                </div>
-              </div>
-              <StatusPill tone="info" dot={false}>{selectedProjectMembers.length} 人</StatusPill>
-            </div>
-            {selectedProjectMembers.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
-                暂无分配账号
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {selectedProjectMembers.map((member) => {
-                  const profile = profileMap.get(member.user_id);
-                  return (
-                    <div key={member.id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/20 px-3 py-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{profile?.display_name || "未命名用户"}</div>
-                        <div className="truncate text-xs text-muted-foreground">{profile?.organization || member.user_id}</div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <StatusPill tone={ROLE_TONE[member.role]} dot={false}>{ROLE_LABEL[member.role]}</StatusPill>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => removeProjectMember(member)}>
-                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div>
-            <div className="mb-3 flex flex-wrap items-center gap-3">
-              <Input
-                value={assignmentSearch}
-                onChange={(event) => setAssignmentSearch(event.target.value)}
-                placeholder="搜索项目 / 账号 / 单位 / 角色"
-                className="max-w-md"
-              />
-              <div className="text-xs text-muted-foreground font-mono">
-                {projectAssignmentRows.length} / {projectMembers.length} 条分配
-              </div>
-            </div>
-            {projectAssignmentRows.length === 0 ? (
-              <EmptyState icon={FolderKanban} title="暂无项目分配记录" hint="请先在上方选择项目和账号，再点击“分配项目”。" />
-            ) : (
-              <div className="overflow-x-auto rounded-xl border border-border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>项目</TableHead>
-                      <TableHead>账号</TableHead>
-                      <TableHead>项目身份</TableHead>
-                      <TableHead>来源</TableHead>
-                      <TableHead className="w-24 text-right">操作</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {projectAssignmentRows.map((member) => (
-                      <TableRow key={member.id}>
-                        <TableCell>
-                          <div className="font-medium">{member.project?.name || "项目已删除"}</div>
-                          <div className="text-xs text-muted-foreground">{member.project?.unit || "—"}</div>
-                        </TableCell>
-                        <TableCell>
-                          <div className="font-medium">{member.profile?.display_name || "未命名用户"}</div>
-                          <div className="text-xs text-muted-foreground">{member.profile?.organization || member.user_id}</div>
-                        </TableCell>
-                        <TableCell>
-                          <StatusPill tone={ROLE_TONE[member.role]} dot={false}>{ROLE_LABEL[member.role]}</StatusPill>
-                        </TableCell>
-                        <TableCell>{member.source === "admin" ? "管理员分配" : "历史分配"}</TableCell>
-                        <TableCell className="text-right">
-                          <Button size="sm" variant="ghost" onClick={() => removeProjectMember(member)}>
-                            <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                            移除
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-          </div>
-        </div>
       </Card>
 
       <Card className="surface-card p-4">
@@ -744,6 +963,81 @@ const SecurityCenter = () => {
       </Card>
 
       <ConfirmDialog />
+      <Dialog
+        open={!!projectPickerUserId}
+        onOpenChange={(open) => {
+          if (!open) {
+            setProjectPickerUserId("");
+            setProjectPickerSearch("");
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>编辑可见项目</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+              <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm">
+                <div className="font-medium">{projectPickerProfile?.display_name || "未命名用户"}</div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  勾选项目即可分配；用户自己创建的项目会自动保留。
+                </div>
+              </div>
+              <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-sm text-right">
+                <div className="font-mono text-2xl font-semibold">{projectPickerSelectedIds.size}</div>
+                <div className="text-xs text-muted-foreground">已分配项目</div>
+              </div>
+            </div>
+            <Input
+              value={projectPickerSearch}
+              onChange={(event) => setProjectPickerSearch(event.target.value)}
+              placeholder="搜索项目名称 / 单位"
+              className="h-9"
+            />
+            <div className="max-h-[55vh] overflow-y-auto rounded-xl border border-border">
+              {projects.length === 0 ? (
+                <EmptyState icon={FolderKanban} title="暂无项目" hint="当前没有可分配的项目。" />
+              ) : visibleProjectPickerProjects.length === 0 ? (
+                <EmptyState icon={FolderKanban} title="未找到项目" hint="请换一个关键词再筛选。" />
+              ) : (
+                <div className="grid gap-2 p-3 sm:grid-cols-2">
+                  {visibleProjectPickerProjects.map((project) => {
+                    const isCreated = projectPickerCreatedIds.has(project.id);
+                    const checked = isCreated || projectPickerAssignedIds.has(project.id);
+                    return (
+                      <label
+                        key={`project-picker-${project.id}`}
+                        className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                          checked ? "border-primary/30 bg-primary/5" : "border-border hover:bg-muted/30"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          className="mt-1 h-4 w-4 rounded border-border"
+                          checked={checked}
+                          disabled={isCreated}
+                          onChange={(event) => toggleUserProject(projectPickerUserId, project.id, event.target.checked)}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium">{project.name}</div>
+                          <div className="truncate text-xs text-muted-foreground">{project.unit || "未填写单位"}</div>
+                        </div>
+                        <StatusPill tone={isCreated ? "gold" : checked ? "success" : "info"} dot={false}>
+                          {isCreated ? "创建" : checked ? "已分配" : "未选"}
+                        </StatusPill>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setProjectPickerUserId("")}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={resetOpen} onOpenChange={setResetOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>

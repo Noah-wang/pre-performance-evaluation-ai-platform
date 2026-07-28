@@ -321,12 +321,7 @@ const Meetings = () => {
       });
       if (insErr) toast.error(insErr.message);
       else {
-        const injectedTags = [
-          data?.injected?.materialSnippets > 0 && `资料×${data.injected.materialSnippets}`,
-          data?.injected?.historicalReports > 0 && `历史×${data.injected.historicalReports}`,
-          data?.injected?.goalTargets > 0 && `目标×${data.injected.goalTargets}`,
-        ].filter(Boolean).join(" · ");
-        toast.success(`AI 分析完成${injectedTags ? ` · 已注入 ${injectedTags}` : ""}`);
+        toast.success("AI 分析完成 · 仅基于会议纪要原文");
         loadAnalysis(active.id);
       }
     } finally {
@@ -603,8 +598,8 @@ const Meetings = () => {
   return (
     <div className="max-w-full overflow-x-hidden">
       <PageHeader
-        eyebrow="PHASE II · 06 · 评估会议"
-        title="预评估与正式评估"
+        eyebrow="PHASE II · 06A · 评估会议"
+        title="预评估"
         subtitle="上传会议纪要与专家材料 · AI 归并业务 / 管理 / 财务意见 · 匹配评分指标"
       />
 
@@ -868,7 +863,7 @@ const Meetings = () => {
                         ) : analysis?.summary ? (
                           <MarkdownView content={analysis.summary} className="font-display" />
                         ) : (
-                          "点击右上角“AI 分析”后，系统会基于会议纪要和专家材料生成可用于预评估的意见要点。"
+                          "点击右上角“AI 分析”后，系统只会基于会议转写和纪要原文生成预评估意见草稿；纪要里没有说到的内容不会自动补写。"
                         )}
                       </div>
                       <div className="rounded-md border border-border bg-background/70 p-3">

@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
+import { Mark, mergeAttributes } from "@tiptap/core";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Image from "@tiptap/extension-image";
@@ -24,7 +26,46 @@ interface Props {
   onSelectionChange?: (text: string) => void;
   editable?: boolean;
   variant?: "default" | "document";
+  /**
+   * 把工具栏渲染到编辑器之外的容器里。
+   *
+   * 报告正文嵌在会滚动的稿纸容器中，工具栏留在里面要么随内容滚走、要么吸顶压住正文。
+   * 传入面板顶栏的节点后，工具栏常驻在稿纸之外，两个毛病都不存在。
+   */
+  toolbarContainer?: HTMLElement | null;
 }
+
+const ReportCitation = Mark.create({
+  name: "reportCitation",
+  inclusive: false,
+  addAttributes() {
+    return {
+      source: {
+        default: null,
+        parseHTML: (element) => element.getAttribute("data-source"),
+        renderHTML: (attributes) => attributes.source ? { "data-source": attributes.source, title: attributes.source } : {},
+      },
+      snippet: {
+        default: null,
+        parseHTML: (element) => element.getAttribute("data-snippet"),
+        renderHTML: (attributes) => attributes.snippet ? { "data-snippet": attributes.snippet } : {},
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "span[data-report-citation]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return [
+      "span",
+      mergeAttributes(HTMLAttributes, {
+        "data-report-citation": "true",
+        class: "report-citation",
+      }),
+      0,
+    ];
+  },
+});
 
 const ToolButton = ({
   active,
@@ -58,6 +99,7 @@ export const RichTextEditor = ({
   onSelectionChange,
   editable = true,
   variant = "default",
+  toolbarContainer = null,
 }: Props) => {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const onSelectionChangeRef = useRef(onSelectionChange);
@@ -85,6 +127,7 @@ export const RichTextEditor = ({
     ].join(" ");
   const editor = useEditor({
     extensions: [
+      ReportCitation,
       StarterKit,
       Image.configure({ inline: false, allowBase64: true }),
       Table.configure({ resizable: true }),
@@ -137,14 +180,15 @@ export const RichTextEditor = ({
 
   const inTable = editor.isActive("table");
 
-  return (
-    <div className={cn(
-      "overflow-hidden border border-border bg-background shadow-sm",
-      variant === "document" ? "rounded-sm" : "rounded-xl",
-    )}>
+  const toolbar = (
       <div
         data-html2canvas-ignore="true"
-        className="sticky top-0 z-10 flex flex-wrap items-center gap-1 border-b border-border bg-card/95 px-3 py-2 backdrop-blur"
+        className={cn(
+          "z-10 flex flex-wrap items-center gap-1",
+          toolbarContainer
+            ? "rounded-lg border border-border bg-card px-2 py-1"
+            : "sticky top-0 border-b border-border bg-card/95 px-3 py-2 backdrop-blur",
+        )}
       >
         <ToolButton title="撤销" onClick={() => editor.chain().focus().undo().run()} disabled={!editor.can().undo()}><Undo2 className="h-4 w-4" /></ToolButton>
         <ToolButton title="重做" onClick={() => editor.chain().focus().redo().run()} disabled={!editor.can().redo()}><Redo2 className="h-4 w-4" /></ToolButton>
@@ -185,6 +229,15 @@ export const RichTextEditor = ({
           }}
         />
       </div>
+  );
+
+  return (
+    <div className={cn(
+      "border border-border bg-background shadow-sm",
+      variant === "document" ? "overflow-visible" : "overflow-hidden",
+      variant === "document" ? "rounded-sm" : "rounded-xl",
+    )}>
+      {toolbarContainer ? createPortal(toolbar, toolbarContainer) : toolbar}
       {variant === "document" ? (
         <div className="bg-muted/15 p-3 sm:p-4">
           <div className={reportDocumentPageClasses}>

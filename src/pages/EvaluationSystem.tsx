@@ -142,7 +142,10 @@ const EvaluationSystem = () => {
 
   const load = async () => {
     const { data: s } = await supabase.from("evaluation_systems").select("*").order("created_at", { ascending: false });
-    const rows = ((s as ESystem[]) ?? []).filter((system) => isAdmin || system.created_by === user?.id);
+    // 可见范围由 RLS 的 can_access_evaluation_system 决定：管理员看全部，其他人看自己
+    // 建的、以及自己有权访问的项目所关联的体系。这里再按 created_by 过滤一次，会把
+    // 「项目关联」这条路径整个抹掉——工作组成员因此看不到本项目的指标体系。
+    const rows = (s as ESystem[]) ?? [];
     setSystems(rows);
     if (!activeId && rows.length) setActiveId(rows[0].id);
     if (activeId && !rows.some((system) => system.id === activeId)) setActiveId(rows[0]?.id ?? "");
@@ -385,7 +388,7 @@ const EvaluationSystem = () => {
         eyebrow="PHASE II · 04A · 评估指标体系"
         title="评估指标体系库"
         subtitle="一/二/三级指标手工增删改 · 自动关联资料项"
-        actions={
+        actions={isAdmin && (
           <Dialog open={sysOpen} onOpenChange={setSysOpen}>
             <DialogTrigger asChild>
               <Button variant="hero"><Plus className="h-4 w-4" />新建指标体系</Button>
@@ -413,7 +416,7 @@ const EvaluationSystem = () => {
               </form>
             </DialogContent>
           </Dialog>
-        }
+        )}
       />
 
       <EditPermissionNotice />
@@ -471,9 +474,11 @@ const EvaluationSystem = () => {
                 <h2 className="font-display text-2xl font-bold text-foreground">{active.name}</h2>
                 {active.description && <p className="mt-2 text-sm text-muted-foreground leading-relaxed">{active.description}</p>}
               </div>
-              <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={delSystem}>
-                <Trash2 className="h-4 w-4 text-destructive" />
-              </Button>
+              {isAdmin && (
+                <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={delSystem}>
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              )}
             </div>
 
             <SectionHeader
@@ -482,19 +487,21 @@ const EvaluationSystem = () => {
               count={indicators.length}
               icon={ListTree}
               actions={
-                <>
-                  {indicators.length === 0 && (
-                    <Button size="sm" variant="outline" onClick={loadTemplate}>
-                      <Sparkles className="h-3.5 w-3.5" />加载预设模板
+                isAdmin ? (
+                  <>
+                    {indicators.length === 0 && (
+                      <Button size="sm" variant="outline" onClick={loadTemplate}>
+                        <Sparkles className="h-3.5 w-3.5" />加载预设模板
+                      </Button>
+                    )}
+                    <Button size="sm" variant="outline" onClick={openLibrary}>
+                      <Library className="h-3.5 w-3.5" />从指标库导入
                     </Button>
-                  )}
-                  <Button size="sm" variant="outline" onClick={openLibrary}>
-                    <Library className="h-3.5 w-3.5" />从指标库导入
-                  </Button>
-                  <Button size="sm" variant="hero" onClick={() => openAdd(1)}>
-                    <Plus className="h-3.5 w-3.5" />新增指标
-                  </Button>
-                </>
+                    <Button size="sm" variant="hero" onClick={() => openAdd(1)}>
+                      <Plus className="h-3.5 w-3.5" />新增指标
+                    </Button>
+                  </>
+                ) : null
               }
             />
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot, ChevronDown, Database, Download, FileSearch, FileText, Link2, Loader2, RefreshCw, Search,
 } from "lucide-react";
@@ -126,6 +126,17 @@ const formatDate = (value: string) => {
   }
 };
 
+const STALE_INDEXING_MS = 2 * 60 * 1000;
+
+const isStaleIndexing = (row: KnowledgeFileRow) => {
+  if (row.status !== "indexing") return false;
+  const touchedAt = row.updated_at || row.indexed_at;
+  if (!touchedAt) return true;
+  const time = new Date(touchedAt).getTime();
+  if (!Number.isFinite(time)) return true;
+  return Date.now() - time > STALE_INDEXING_MS;
+};
+
 const statusMeta = (item: LibraryItem) => {
   if (item.source === "material") {
     return MATERIAL_STATUS[item.status] ?? { label: item.status || "未标记", tone: "neutral" as const };
@@ -134,6 +145,20 @@ const statusMeta = (item: LibraryItem) => {
     return REPORT_STATUS[item.status] ?? { label: item.status || "报告", tone: "info" as const };
   }
   return { label: "版本记录", tone: "info" as const };
+};
+
+const indexMeta = (row?: KnowledgeFileRow) => {
+  if (!row) return { label: "待索引", tone: "warning" as const, kind: "pending" as const };
+  if (row.status === "error") return { label: "索引失败", tone: "danger" as const, kind: "error" as const };
+  if (row.status === "indexing") {
+    if (isStaleIndexing(row)) return { label: "需重试", tone: "danger" as const, kind: "error" as const };
+    return { label: "索引中", tone: "info" as const, kind: "indexing" as const };
+  }
+  if (row.status !== "indexed") return { label: "待索引", tone: "warning" as const, kind: "pending" as const };
+  if (/未提取|文件信息级|metadata_only/i.test(row.error_message ?? "")) {
+    return { label: "仅文件信息", tone: "warning" as const, kind: "metadata" as const };
+  }
+  return { label: "全文已索引", tone: "success" as const, kind: "full_text" as const };
 };
 
 const compactSnippet = (value: string, max = 120) => {
@@ -164,6 +189,7 @@ export default function KnowledgeBase() {
   const [indexing, setIndexing] = useState(false);
   const [answer, setAnswer] = useState("");
   const [hits, setHits] = useState<KnowledgeHit[]>([]);
+  const autoIndexKeyRef = useRef("");
 
   const supabaseAny = supabase as any;
 
@@ -232,11 +258,13 @@ export default function KnowledgeBase() {
 
   const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const reportMap = useMemo(() => new Map(reports.map((report) => [report.id, report])), [reports]);
-  const indexedMaterialIds = useMemo(() => new Set(
+  const materialIndexMap = useMemo(() => {
+    const map = new Map<string, KnowledgeFileRow>();
     knowledgeFiles
-      .filter((item) => item.source_type === "material" && item.status === "indexed" && item.source_id)
-      .map((item) => item.source_id as string),
-  ), [knowledgeFiles]);
+      .filter((item) => item.source_type === "material" && item.source_id)
+      .forEach((item) => map.set(item.source_id as string, item));
+    return map;
+  }, [knowledgeFiles]);
 
   const items = useMemo<LibraryItem[]>(() => {
     const materialItems = materials.map((material) => ({
@@ -314,6 +342,26 @@ export default function KnowledgeBase() {
     window.open(data.signedUrl, "_blank");
   };
 
+  const handleReindexMaterial = async (item: LibraryItem) => {
+    if (item.source !== "material") return;
+    const toastId = toast.loading(`正在重建索引：${compactSnippet(item.fileName, 36)}`);
+    try {
+      const { data, error } = await supabase.functions.invoke("ingest-project-knowledge", {
+        body: { materialId: item.id, force: true },
+      });
+      if (error) throw error;
+      await loadData();
+      if (Number(data?.failed ?? 0) > 0) {
+        toast.warning("索引处理完成，但该文件正文提取失败，请查看状态说明", { id: toastId });
+      } else {
+        toast.success("索引已重建", { id: toastId });
+      }
+    } catch (error: any) {
+      await loadData();
+      toast.error(await extractFunctionErrorMessage(error), { id: toastId });
+    }
+  };
+
   const handleSearch = async () => {
     if (selectedProject === PROJECT_ALL) return toast.error("请先选择一个具体项目，再进行文件库问答");
     if (!query.trim()) return toast.error("请输入要检索的问题");
@@ -339,23 +387,52 @@ export default function KnowledgeBase() {
     }
   };
 
+  /**
+   * 强制重新解析当前项目的全部资料。
+   *
+   * 用 force 是有意的：文件没变时增量索引会整份跳过，所以解析能力升级（比如扫描件
+   * 改走视觉 OCR）之后，旧文件永远拿不到更好的正文。代价是每一页都会重新调用 OCR，
+   * 按页计费也更慢，因此执行前必须让用户确认。
+   */
   const handleRefreshIndex = async () => {
     if (selectedProject === PROJECT_ALL) return toast.error("请先选择一个具体项目");
+    const targetItems = visibleMaterialItems.filter((item) => item.project_id === selectedProject);
+    if (!targetItems.length) return toast.info("当前项目暂无可索引资料");
+    const confirmed = window.confirm(
+      `将对当前项目 ${targetItems.length} 份资料全部重新解析（不跳过未变化的文件）。\n`
+      + `扫描件需要逐页 OCR，每份约 20 秒到 2 分钟，期间请不要关闭页面。\n\n确定继续？`,
+    );
+    if (!confirmed) return;
+
     setIndexing(true);
-    const toastId = toast.loading("正在更新项目索引，未变化的文件会自动跳过...");
+    const toastId = toast.loading(`正在重新解析 1/${targetItems.length}...`);
     try {
-      const { data, error } = await supabase.functions.invoke("ingest-project-knowledge", {
-        body: { projectId: selectedProject },
-      });
-      if (error) throw error;
+      let indexed = 0;
+      let failed = 0;
+
+      for (const [index, item] of targetItems.entries()) {
+        toast.loading(`正在重新解析 ${index + 1}/${targetItems.length}：${compactSnippet(item.fileName, 32)}`, { id: toastId });
+        try {
+          const { data, error } = await supabase.functions.invoke("ingest-project-knowledge", {
+            body: { materialId: item.id, force: true },
+          });
+          if (error) throw error;
+          indexed += Number(data?.indexed ?? 0);
+          failed += Number(data?.failed ?? 0);
+        } catch (error) {
+          failed += 1;
+          console.warn("single material indexing failed", item.id, error);
+        }
+        if ((index + 1) % 5 === 0 || index === targetItems.length - 1) {
+          await loadData();
+        }
+      }
+
       await loadData();
-      const failed = Number(data?.failed ?? 0);
-      const indexed = Number(data?.indexed ?? 0);
-      const skipped = Number(data?.skipped ?? 0);
       if (failed > 0) {
-        toast.warning(`索引完成，但有 ${failed} 个文件未成功；已更新 ${indexed} 个，跳过 ${skipped} 个未变化文件`, { id: toastId });
+        toast.warning(`重新解析完成：成功 ${indexed} 个，${failed} 个未提取到正文，请查看状态说明`, { id: toastId });
       } else {
-        toast.success(`索引已更新：新增/重建 ${indexed} 个，跳过 ${skipped} 个未变化文件`, { id: toastId });
+        toast.success(`重新解析完成：${indexed} 份资料已用最新解析能力重建索引`, { id: toastId });
       }
     } catch (error: any) {
       toast.error(await extractFunctionErrorMessage(error), { id: toastId });
@@ -366,7 +443,50 @@ export default function KnowledgeBase() {
 
   const materialCount = items.filter((item) => item.source === "material").length;
   const generatedCount = items.filter((item) => item.source !== "material").length;
-  const indexedCount = visibleItems.filter((item) => item.source === "material" && indexedMaterialIds.has(item.id)).length;
+  const visibleMaterialItems = visibleItems.filter((item) => item.source === "material");
+  const fullTextIndexCount = visibleMaterialItems.filter((item) => indexMeta(materialIndexMap.get(item.id)).kind === "full_text").length;
+  const metadataOnlyCount = visibleMaterialItems.filter((item) => indexMeta(materialIndexMap.get(item.id)).kind === "metadata").length;
+  const pendingIndexCount = visibleMaterialItems.filter((item) => indexMeta(materialIndexMap.get(item.id)).kind === "pending").length;
+  const failedIndexCount = visibleMaterialItems.filter((item) => indexMeta(materialIndexMap.get(item.id)).kind === "error").length;
+  const autoIndexKey = useMemo(() => {
+    if (selectedProject === PROJECT_ALL) return "";
+    return visibleMaterialItems
+      .filter((item) => {
+        const kind = indexMeta(materialIndexMap.get(item.id)).kind;
+        return kind === "pending" || kind === "metadata" || kind === "error";
+      })
+      .map((item) => item.id)
+      .sort()
+      .join("|");
+  }, [materialIndexMap, selectedProject, visibleMaterialItems]);
+
+  useEffect(() => {
+    if (selectedProject === PROJECT_ALL || !autoIndexKey) return;
+    const runKey = `${selectedProject}:${autoIndexKey}`;
+    if (autoIndexKeyRef.current === runKey) return;
+    autoIndexKeyRef.current = runKey;
+
+    let cancelled = false;
+    setIndexing(true);
+    supabase.functions.invoke("ingest-project-knowledge", {
+      body: { projectId: selectedProject, limit: 500, force: false },
+    }).then(async ({ error }) => {
+      if (cancelled) return;
+      if (error) throw error;
+      await loadData();
+    }).catch((error) => {
+      if (cancelled) return;
+      console.warn("auto knowledge indexing failed", error);
+      toast.warning("自动索引未完成，可稍后在文件库中重新处理");
+    }).finally(() => {
+      if (!cancelled) setIndexing(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [autoIndexKey, selectedProject]);
+
   return (
     <div className="page-container">
       <PageHeader
@@ -378,8 +498,8 @@ export default function KnowledgeBase() {
       <div className="grid gap-4 md:grid-cols-4">
         <StatTile label="FILES" value={items.length.toString().padStart(2, "0")} hint="系统文件记录" icon={Database} tone="info" />
         <StatTile label="MATERIALS" value={materialCount.toString().padStart(2, "0")} hint="资料收集审核文件" icon={FileSearch} tone="success" />
-        <StatTile label="INDEXED" value={indexedCount.toString().padStart(2, "0")} hint="当前筛选已建索引资料" icon={RefreshCw} tone="accent" />
-        <StatTile label="PROJECTS" value={projects.length.toString().padStart(2, "0")} hint="可筛选项目" icon={Link2} tone="gold" />
+        <StatTile label="FULL TEXT" value={fullTextIndexCount.toString().padStart(2, "0")} hint="当前筛选全文可检索资料" icon={RefreshCw} tone="accent" />
+        <StatTile label="待处理" value={(pendingIndexCount + failedIndexCount + metadataOnlyCount).toString().padStart(2, "0")} hint={`待处理 ${pendingIndexCount} · 仅文件信息 ${metadataOnlyCount} · 失败 ${failedIndexCount}`} icon={Link2} tone="gold" />
       </div>
 
       <Card className="mt-5">
@@ -406,9 +526,10 @@ export default function KnowledgeBase() {
                   onClick={handleRefreshIndex}
                   disabled={indexing || selectedProject === PROJECT_ALL}
                   className="gap-2"
+                  title="强制重新解析当前项目全部资料，不跳过未变化的文件；扫描件会重新走 OCR"
                 >
                   {indexing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                  更新项目索引
+                  重新处理索引
                 </Button>
               </div>
             }
@@ -572,6 +693,8 @@ export default function KnowledgeBase() {
               <TableBody>
                 {visibleItems.map((item) => {
                   const meta = statusMeta(item);
+                  const materialIndex = item.source === "material" ? materialIndexMap.get(item.id) : undefined;
+                  const materialIndexMeta = indexMeta(materialIndex);
                   return (
                     <TableRow key={`${item.source}-${item.id}`}>
                       <TableCell>
@@ -587,16 +710,29 @@ export default function KnowledgeBase() {
                       <TableCell>
                         <div className="flex flex-wrap gap-1">
                           <StatusPill tone={meta.tone}>{meta.label}</StatusPill>
-                          {item.source === "material" && (
-                            indexedMaterialIds.has(item.id)
-                              ? <StatusPill tone="success">已索引</StatusPill>
-                              : <StatusPill tone="warning">待索引</StatusPill>
-                          )}
+                          {item.source === "material" && <StatusPill tone={materialIndexMeta.tone}>{materialIndexMeta.label}</StatusPill>}
                         </div>
+                        {item.source === "material" && materialIndex?.error_message && (
+                          <div className="mt-1 max-w-[220px] text-xs leading-5 text-muted-foreground">
+                            {compactSnippet(materialIndex.error_message, 90)}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">{formatDate(item.createdAt)}</TableCell>
                       <TableCell>
-                        <div className="flex justify-end">
+                        <div className="flex justify-end gap-2">
+                          {item.source === "material" && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleReindexMaterial(item)}
+                              disabled={indexing}
+                              className="gap-2"
+                            >
+                              <RefreshCw className="h-4 w-4" />
+                              重建索引
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="sm"
