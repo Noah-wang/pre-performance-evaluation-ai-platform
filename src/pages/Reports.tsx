@@ -29,6 +29,9 @@ import {
 } from "@/lib/reportGenerationState";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { StatusPill, EmptyState, SectionHeader } from "@/components/ui-kit";
 import { MarkdownView } from "@/components/MarkdownView";
 import { RichTextEditor } from "@/components/RichTextEditor";
@@ -568,7 +571,8 @@ const Reports = () => {
   useEffect(() => {
     supabase.from("projects").select("id,name,unit,budget,category,description,package_id,evaluation_system_id,budget_unit,expense_dept,agent_org,manager,list_attribute,project_attribute,fee_calculation,custom_fields,wording_decisions")
       .order("created_at", { ascending: false })
-      .then(({ data }) => setProjects((data as Project[]) ?? []));
+      // 生成的数据库类型还没包含 wording_decisions，这里显式放宽以免类型报错。
+      .then(({ data }) => setProjects((data as unknown as Project[]) ?? []));
   }, []);
 
   useEffect(() => {
