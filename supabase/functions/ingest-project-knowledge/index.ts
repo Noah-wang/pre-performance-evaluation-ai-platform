@@ -1,5 +1,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { extractBlobText, isSupportedKnowledgeFile } from "../_shared/materials.ts";
+import {
+  extractBlobText,
+  fetchExtractionJob,
+  isSupportedKnowledgeFile,
+  needsExtractionService,
+  submitExtractionJob,
+} from "../_shared/materials.ts";
 import { chunkText, createTextEmbeddingsAsync, tokenizeForEmbedding, vectorLiteral } from "../_shared/embedding.ts";
 import { normalizeEvidenceTextForPrompt } from "../_shared/rag.ts";
 
@@ -37,10 +43,6 @@ const buildIndexText = (params: {
   const body = params.text.trim();
   return body ? `${header}\n\n${body}` : `${header}\n\n[提示] 该文件暂未提取到稳定正文，已按文件名称、类别和说明纳入检索。`;
 };
-
-// 单次调用最多占用的时间。Edge Function worker 上限 5 分钟，留出余量给
-// 向量化和入库；超出就保存进度返回，由调用方再次触发继续。
-const BATCH_TIME_BUDGET_MS = 80_000;
 
 const MAX_CHUNKS_PER_FILE = 80;
 const CHUNK_LENGTH = 2400;
@@ -88,13 +90,12 @@ Deno.serve(async (req) => {
     const { data: materials, error: materialError } = await query;
     if (materialError) throw materialError;
 
-    const startedAt = Date.now();
     const stats = {
       total: materials?.length ?? 0,
       indexed: 0,
       skipped: 0,
       failed: 0,
-      partial: 0,
+      pending: 0,
       errors: [] as string[],
     };
 
@@ -106,7 +107,7 @@ Deno.serve(async (req) => {
 
       const { data: existingRows, error: existingError } = await supabase
         .from("knowledge_files")
-        .select("id,status,source_updated_at,text_hash,error_message,parse_cursor")
+        .select("id,status,source_updated_at,text_hash,error_message,parse_job_id")
         .eq("source_type", "material")
         .eq("source_id", material.id)
         .limit(1);
@@ -176,47 +177,76 @@ Deno.serve(async (req) => {
 
         // 长文档（几十页扫描件）单次解析必然超时：视觉 OCR 每页 20-30 秒，而
         // Edge Function 的 worker 上限是 5 分钟。改为按页分批推进：单次调用只做
-        // 时间预算内能完成的页，进度写进 parse_cursor，后续调用接着做。已完成的
+        // 解析服务是常驻进程，不受网关超时与 worker 上限约束，长文档因此能跑完。
         // 页立刻入库，中途失败也不必从头再来。
-        const resumeFrom = force ? 0 : Number(existing?.parse_cursor ?? 0) || 0;
-        const batches: string[] = [];
-        let cursor: number | null = resumeFrom;
+        // 需要 OCR 的文件（扫描 PDF、图片、旧版 doc）交给解析服务异步跑：提交
+        // 任务后立刻返回，用户不必等待；后续调用轮询结果再入库。视觉 OCR 每页
+        // 20-30 秒，几十页的扫描件在 Edge Function 里同步做必然超时。
+        // 其余类型（docx/xlsx/纯文本）在 Edge 内直接解析，很快，无需绕这一圈。
+        let batchText = "";
         let totalPages: number | null = null;
 
-        while (cursor !== null && Date.now() - startedAt < BATCH_TIME_BUDGET_MS) {
-          const batch = await extractBlobText(blob, fileName, material.review_note ?? "", cursor);
-          if (batch.text.trim()) batches.push(batch.text);
-          totalPages = batch.progress.totalPages ?? totalPages;
-          const next = batch.progress.nextStartPage;
-          if (next === null || next === undefined || next <= cursor) {
-            cursor = null;
-            break;
+        if (needsExtractionService(fileName)) {
+          const existingJob = force ? "" : String(existing?.parse_job_id ?? "");
+          const job = existingJob ? await fetchExtractionJob(existingJob) : null;
+
+          if (!job || job.status === "missing") {
+            // 没有任务，或解析服务重启后任务丢失：重新提交
+            const jobId = await submitExtractionJob(blob, fileName);
+            if (!jobId) throw new Error("文档解析服务不可用，请检查 ENABLE_DOCUMENT_EXTRACTOR 与解析服务地址。");
+            await supabase
+              .from("knowledge_files")
+              .update({
+                status: "indexing",
+                parse_job_id: jobId,
+                parse_started_at: new Date().toISOString(),
+                error_message: "正在后台解析，稍后可查看结果。",
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", fileId);
+            stats.pending += 1;
+            activeFileId = null;
+            continue;
           }
-          cursor = next;
+
+          if (job.status === "running") {
+            await supabase
+              .from("knowledge_files")
+              .update({
+                status: "indexing",
+                error_message: "正在后台解析，稍后可查看结果。",
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", fileId);
+            stats.pending += 1;
+            activeFileId = null;
+            continue;
+          }
+
+          if (job.status === "error") {
+            throw new Error(`文档解析失败：${job.error ?? "未知错误"}`);
+          }
+
+          batchText = job.text.trim();
+          totalPages = job.totalPages;
+        } else {
+          batchText = (await extractBlobText(blob, fileName, material.review_note ?? "")).text.trim();
         }
 
-        const batchText = batches.join("\n").trim();
-        const isFirstBatch = resumeFrom === 0;
-        if (isFirstBatch && !batchText) {
+        if (!batchText) {
           throw new Error("文件未提取到可用正文，不能标记为已索引，请检查文件内容或解析服务。");
         }
 
-        // 首批带资料名称等头部信息；续跑批次只追加正文。
-        const text = isFirstBatch
-          ? buildIndexText({
-            title,
-            fileName,
-            category: material.category,
-            summary: material.review_note,
-            text: batchText,
-          })
-          : batchText;
+        const text = buildIndexText({
+          title,
+          fileName,
+          category: material.category,
+          summary: material.review_note,
+          text: batchText,
+        });
 
         const textHash = await sha256(text);
-        if (
-          isFirstBatch && cursor === null && !force && !existingMetadataOnly
-          && existing?.status === "indexed" && existing.text_hash === textHash
-        ) {
+        if (!force && !existingMetadataOnly && existing?.status === "indexed" && existing.text_hash === textHash) {
           await supabase
             .from("knowledge_files")
             .update({
@@ -231,27 +261,16 @@ Deno.serve(async (req) => {
           continue;
         }
 
-        // 从头解析才清空旧切片；续跑时追加在已有切片之后。
-        let chunkOffset = 0;
-        if (isFirstBatch) {
-          await supabase.from("knowledge_chunks").delete().eq("file_id", fileId);
-        } else {
-          const { count } = await supabase
-            .from("knowledge_chunks")
-            .select("id", { count: "exact", head: true })
-            .eq("file_id", fileId);
-          chunkOffset = Number(count ?? 0);
-        }
+        await supabase.from("knowledge_chunks").delete().eq("file_id", fileId);
 
-        const chunks = chunkText(text, CHUNK_LENGTH, CHUNK_OVERLAP)
-          .slice(0, Math.max(0, MAX_CHUNKS_PER_FILE - chunkOffset));
-        if (!chunks.length && isFirstBatch) throw new Error("文件正文为空，无法建立索引");
+        const chunks = chunkText(text, CHUNK_LENGTH, CHUNK_OVERLAP).slice(0, MAX_CHUNKS_PER_FILE);
+        if (!chunks.length) throw new Error("文件正文为空，无法建立索引");
 
         const embeddings = await createTextEmbeddingsAsync(chunks, 8);
         const rows = chunks.map((content, index) => ({
             file_id: fileId,
             project_id: material.project_id,
-            chunk_index: chunkOffset + index,
+            chunk_index: index,
             content,
             token_count: tokenizeForEmbedding(content).length,
             embedding: vectorLiteral(embeddings[index]),
@@ -275,20 +294,18 @@ Deno.serve(async (req) => {
           Boolean(normalizeEvidenceTextForPrompt(content))
         ).length;
 
-        const done = cursor === null;
         await supabase
           .from("knowledge_files")
           .update({
-            status: done ? "indexed" : "indexing",
-            chunk_count: chunkOffset + rows.length,
-            parse_cursor: cursor,
+            status: "indexed",
+            chunk_count: rows.length,
+            parse_job_id: null,
+            parse_cursor: null,
             parse_total_pages: totalPages,
-            summary: isFirstBatch ? text.slice(0, 600) : undefined,
-            text_hash: done ? textHash : null,
-            indexed_at: done ? new Date().toISOString() : null,
-            error_message: !done
-              ? `解析进行中：已完成前 ${cursor} 页${totalPages ? ` / 共 ${totalPages} 页` : ""}，再次触发索引可继续。`
-              : usableChunks
+            summary: text.slice(0, 600),
+            text_hash: textHash,
+            indexed_at: new Date().toISOString(),
+            error_message: usableChunks
               ? null
               : "未提取到可用正文，仅建立文件信息级索引；报告生成不会采信该文件，请检查文档解析/OCR 服务后重新解析。",
             source_updated_at: sourceUpdatedAt,
@@ -296,12 +313,7 @@ Deno.serve(async (req) => {
           })
           .eq("id", fileId);
 
-        if (!done) {
-          stats.partial += 1;
-          stats.errors.push(
-            `${title}: 已解析 ${cursor}${totalPages ? `/${totalPages}` : ""} 页，需再次触发以继续`,
-          );
-        } else if (usableChunks) stats.indexed += 1;
+        if (usableChunks) stats.indexed += 1;
         else {
           stats.failed += 1;
           stats.errors.push(`${title}: 未提取到可用正文，仅建立文件信息级索引`);

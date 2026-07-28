@@ -256,6 +256,31 @@ export default function KnowledgeBase() {
     loadData();
   }, []);
 
+  // 解析在后台跑，完成后需要有人把结果回收入库。这里对仍在解析中的资料定时
+  // 触发一次索引：任务没跑完就原样返回，跑完了就落库并刷新列表。
+  useEffect(() => {
+    const pending = knowledgeFiles.filter(
+      (row) => row.source_type === "material" && row.source_id && row.status === "indexing",
+    );
+    if (!pending.length) return;
+    const timer = setInterval(async () => {
+      let changed = false;
+      for (const row of pending.slice(0, 5)) {
+        try {
+          const { data } = await supabase.functions.invoke("ingest-project-knowledge", {
+            body: { materialId: row.source_id, force: false, limit: 1 },
+          });
+          if (Number(data?.indexed ?? 0) > 0 || Number(data?.failed ?? 0) > 0) changed = true;
+        } catch (error) {
+          console.warn("poll parsing job failed", row.source_id, error);
+        }
+      }
+      if (changed) await loadData();
+    }, 20_000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [knowledgeFiles]);
+
   const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const reportMap = useMemo(() => new Map(reports.map((report) => [report.id, report])), [reports]);
   const materialIndexMap = useMemo(() => {

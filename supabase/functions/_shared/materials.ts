@@ -182,3 +182,60 @@ export const extractMaterialText = async (
     return fallback;
   }
 };
+
+export interface ExtractionJobStatus {
+  status: "running" | "done" | "error" | "missing";
+  text: string;
+  totalPages: number | null;
+  error: string | null;
+}
+
+const extractorBaseUrl = () =>
+  (Deno.env.get("DOCUMENT_EXTRACTOR_BASE_URL") || Deno.env.get("LOCAL_OCR_BASE_URL"))?.trim() ?? "";
+
+const extractorEnabled = () => Deno.env.get("ENABLE_DOCUMENT_EXTRACTOR") === "true";
+
+/**
+ * 提交异步解析任务。
+ *
+ * 视觉 OCR 每页 20-30 秒，几十页的扫描件在 Edge Function 里同步做必然超时。
+ * 解析服务是常驻进程，把耗时工作交给它，这里只提交任务并立刻返回。
+ */
+export const submitExtractionJob = async (blob: Blob, fileName: string): Promise<string> => {
+  const baseUrl = extractorBaseUrl();
+  if (!extractorEnabled() || !baseUrl) return "";
+  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fileName,
+      mimeType: blob.type || "application/octet-stream",
+      fileBase64: toBase64(await blob.arrayBuffer()),
+      maxChars: extractTextMaxChars(),
+    }),
+  });
+  if (!response.ok) throw new Error(`DOCUMENT_EXTRACTOR ${response.status}`);
+  const json = await response.json().catch(() => ({}));
+  return String(json.jobId ?? "");
+};
+
+export const fetchExtractionJob = async (jobId: string): Promise<ExtractionJobStatus> => {
+  const baseUrl = extractorBaseUrl();
+  const empty: ExtractionJobStatus = { status: "missing", text: "", totalPages: null, error: null };
+  if (!baseUrl || !jobId) return empty;
+  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/jobs/${jobId}`);
+  // 解析服务重启会丢掉内存里的任务，调用方据此重新提交。
+  if (response.status === 404) return empty;
+  if (!response.ok) throw new Error(`DOCUMENT_EXTRACTOR ${response.status}`);
+  const json = await response.json().catch(() => ({}));
+  return {
+    status: (json.status ?? "running") as ExtractionJobStatus["status"],
+    text: compactText(String(json.text ?? "")),
+    totalPages: Number.isFinite(Number(json.totalPages)) ? Number(json.totalPages) : null,
+    error: json.error ? String(json.error) : null,
+  };
+};
+
+/** 该文件是否需要走解析服务（其余类型在 Edge 内直接解析，很快）。 */
+export const needsExtractionService = (fileName = "") =>
+  DOCUMENT_EXTRACTOR_EXT.test(fileName) && !DOCX_EXT.test(fileName);

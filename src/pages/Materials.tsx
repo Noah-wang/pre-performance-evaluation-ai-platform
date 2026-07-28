@@ -832,15 +832,11 @@ const Materials = () => {
       }).eq("id", m.id);
       if (error) throw error;
       if (!options.deferIndex) {
-        try {
-          const indexResult = await indexMaterialForRag(m.id);
-          if (!options.silent && Number(indexResult?.failed ?? 0) > 0) {
-            toast.warning("文件已上传，但正文索引不完整；已保留文件信息级索引");
-          }
-        } catch (indexError) {
+        // 解析在后台进行，这里只负责发起，不阻塞上传流程——扫描件 OCR 要几分钟，
+        // 让用户对着界面干等没有意义。解析进度在「文件库」里可见。
+        void indexMaterialForRag(m.id).catch((indexError) => {
           console.warn("material knowledge indexing failed", indexError);
-          if (!options.silent) toast.warning("文件已上传，但检索索引稍后补建");
-        }
+        });
       }
       await loadMaterials();
       if (!options.silent) toast.success("上传成功");

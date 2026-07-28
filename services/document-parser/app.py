@@ -11,6 +11,8 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import threading
+import uuid
 from threading import BoundedSemaphore
 from pathlib import Path
 from typing import Any
@@ -743,3 +745,96 @@ def ocr(payload: OcrRequest) -> dict[str, Any]:
             "startPage": progress.get("startPage"),
             "nextStartPage": progress.get("nextStartPage"),
         }
+
+
+# ---------------------------------------------------------------------------
+# 异步解析任务
+#
+# 视觉 OCR 每页 20-30 秒，几十页的扫描件必然超过网关转发超时和 Edge Function
+# 的 worker 上限。解析服务是常驻进程，不受这两道限制，所以把耗时工作放在这里
+# 的后台线程里跑，调用方只负责提交任务和轮询结果。
+# ---------------------------------------------------------------------------
+
+JOBS: dict[str, dict[str, Any]] = {}
+JOBS_LOCK = threading.Lock()
+JOB_TTL_SECONDS = env_int("PARSE_JOB_TTL_SECONDS", 3600, 300, 86_400)
+JOB_MAX_CONCURRENT = env_int("PARSE_JOB_MAX_CONCURRENT", 2, 1, 8)
+JOB_SEMAPHORE = BoundedSemaphore(JOB_MAX_CONCURRENT)
+
+
+def _prune_jobs() -> None:
+    now = time.time()
+    with JOBS_LOCK:
+        for job_id in [k for k, v in JOBS.items() if now - v.get("updated_at", now) > JOB_TTL_SECONDS]:
+            JOBS.pop(job_id, None)
+
+
+def _run_parse_job(job_id: str, raw: bytes, file_name: str, max_chars: int) -> None:
+    with JOB_SEMAPHORE:
+        try:
+            with tempfile.TemporaryDirectory() as temp_root:
+                tmpdir = Path(temp_root)
+                input_path = tmpdir / f"input{safe_suffix(file_name)}"
+                input_path.write_bytes(raw)
+                # 后台任务没有 HTTP 超时压力，一次把整份文档做完。
+                text, method, pages, progress = extract_text(
+                    input_path, file_name, tmpdir,
+                    max_pages=MAX_PAGES,
+                    time_budget_seconds=env_int("PARSE_JOB_TIME_BUDGET_SECONDS", 1800, 60, 7200),
+                    start_page=0,
+                )
+            with JOBS_LOCK:
+                JOBS[job_id].update({
+                    "status": "done",
+                    "text": compact_text(text, max_chars),
+                    "method": method,
+                    "pages": pages,
+                    "totalPages": progress.get("totalPages"),
+                    "updated_at": time.time(),
+                })
+        except Exception as exc:  # noqa: BLE001 - 任务失败要如实回报给调用方
+            print(f"parse job {job_id} failed: {type(exc).__name__}: {exc}", flush=True)
+            with JOBS_LOCK:
+                JOBS[job_id].update({
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}"[:400],
+                    "updated_at": time.time(),
+                })
+
+
+@app.post("/jobs")
+def create_job(payload: OcrRequest) -> dict[str, Any]:
+    try:
+        raw = base64.b64decode(payload.fileBase64, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid fileBase64") from exc
+
+    _prune_jobs()
+    job_id = uuid.uuid4().hex
+    max_chars = max(12_000, min(500_000, payload.maxChars or MAX_CHARS))
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "status": "running",
+            "fileName": payload.fileName,
+            "text": "",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+    threading.Thread(
+        target=_run_parse_job, args=(job_id, raw, payload.fileName, max_chars), daemon=True,
+    ).start()
+    return {"jobId": job_id, "status": "running"}
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        result = dict(job)
+    # 取走结果后即可释放，避免长期占内存
+    if result.get("status") in ("done", "error"):
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+    return result
