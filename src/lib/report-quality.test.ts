@@ -173,4 +173,19 @@ describe("report quality corrections", () => {
     expect(result).toContain("未明确具体采购方式");
     expect(result).toContain("不作为档案存储服务价格依据");
   });
+
+  it("不把逐一列举资料名称的正常语句判成乱码", () => {
+    const line = "评估工作组查阅了项目单位提供的申报类资料，包括《北京市通州区档案存储及管理服务项目申报书.docx》"
+      + "《2026年经常性专项申报文本（签章版）.pdf》，政策依据与标准规范类资料，包括《1.中华人民共和国档案法.pdf》、"
+      + "“3.中华人民共和国档案行业标准-《档案保管外包服务管理规范》DAT 67-2017.pdf”、"
+      + "“4.中华人民共和国国家标准《社会保险业务档案管理规范》（GBT 31599-2015）.pdf”、"
+      + "《10.DAT 31-2017 纸质档案数字化规范.pdf》，合同结算类资料，包括《2018-2022项目服务合同.pdf》。";
+    expect(containsCorruptedReportText(line)).toBe(false);
+  });
+
+  it("仍然拦住中文被拉丁碎片淹没的乱码", () => {
+    const line = "2026 年 经 常 单位 名 称 AL aK HH 项 目 名 称 ial __ CAL RTL AR WAY RS SE at AY | sii be "
+      + "LACKING an ok tr 档案 存储 及 管理 服务 项目 abc def ghi jkl mno pqr stu vwx yza bcd efg hij klm nop qrs";
+    expect(containsCorruptedReportText(line)).toBe(true);
+  });
 });

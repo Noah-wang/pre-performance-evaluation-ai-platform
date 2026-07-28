@@ -307,18 +307,46 @@ export const cleanReportLanguage = (report: string) =>
     .replace(/调研发现无发现问题/g, "调研未发现问题")
     .replace(/\s+([，。；：])/g, "$1");
 
+/**
+ * 挑出正文里混进的 OCR 乱码行。
+ *
+ * 难点在于区分两类都含大量拉丁字符的句子：
+ *   正常——逐一列举资料名称，"《…申报书.docx》《…_01.png》DAT 67-2017"
+ *   乱码——中文之间散落着孤立碎片，"项目名称 Rt ene 项目属性 ee 和天上期 ogg"
+ *
+ * 单看碎片数量会误杀前者（几十份资料轻松越线，整段被拒后重试耗尽，一个字都
+ * 生成不出来）；中文占比也区分不开（实测 56.6% 对 57.0%）。关键差异是：正常
+ * 文本里的拉丁字符都长在文件名、扩展名和标准号内部，把这些整体剔除后就不剩
+ * 什么了；乱码剔除后仍是一地碎片。
+ */
 export const corruptedReportLines = (value: unknown) =>
   String(value ?? "")
     .split(/\n+/)
     .filter((line) => {
       if (/^本次评估已逐份查阅并核验以下补充资料/.test(line.trim())) return false;
       if (line.length < 80) return false;
-      const latinTokens = line.match(/\b[A-Za-z]{1,5}\b/g) ?? [];
-      const noiseMarks = line.match(/[|~_]{1,}|(?:-{3,})/g) ?? [];
+
       const chineseChars = line.match(/[\u4e00-\u9fa5]/g)?.length ?? 0;
-      return chineseChars >= 20
-        && latinTokens.length >= 8
-        && (noiseMarks.length >= 2 || latinTokens.length >= 16);
+      const visibleChars = line.replace(/\s/g, "").length;
+      if (!visibleChars) return false;
+
+      // 中文被彻底淹没：无需再看细节
+      const latinTokens = line.match(/\b[A-Za-z]{1,5}\b/g) ?? [];
+      if (chineseChars >= 8 && chineseChars / visibleChars < 0.3) {
+        return latinTokens.length >= 8;
+      }
+      if (chineseChars < 20) return false;
+
+      // 剔除合法载体：书名号/引号内的文件名、扩展名、标准号
+      const stripped = line
+        .replace(/《[^》]*》/g, "")
+        .replace(/[“”][^“”]*[“”]/g, "")
+        .replace(/\S+\.(?:pdf|docx?|docm|xlsx?|xlsm|csv|png|jpe?g|webp|txt)/gi, "")
+        .replace(/(?:DA\/?\s*T|DAT|GB\/?\s*T|GB|DB\d+\/?\s*T|ISO)\s*[\w\-./—－]*/gi, "");
+      const strayTokens = stripped.match(/\b[A-Za-z]{1,5}\b/g) ?? [];
+      const noiseMarks = stripped.match(/[|~_]{1,}|(?:-{3,})/g) ?? [];
+
+      return strayTokens.length >= 6 || (strayTokens.length >= 3 && noiseMarks.length >= 2);
     });
 
 export const containsCorruptedReportText = (value: unknown) =>
