@@ -65,6 +65,7 @@ import { useConfirm } from "@/hooks/useConfirm";
 import type { ComprehensiveReportVerification } from "@/lib/reportVerification";
 
 interface Project {
+  wording_decisions?: Record<string, string> | null;
   id: string;
   name: string;
   unit: string;
@@ -561,7 +562,7 @@ const Reports = () => {
   };
 
   useEffect(() => {
-    supabase.from("projects").select("id,name,unit,budget,category,description,package_id,evaluation_system_id,budget_unit,expense_dept,agent_org,manager,list_attribute,project_attribute,fee_calculation,custom_fields")
+    supabase.from("projects").select("id,name,unit,budget,category,description,package_id,evaluation_system_id,budget_unit,expense_dept,agent_org,manager,list_attribute,project_attribute,fee_calculation,custom_fields,wording_decisions")
       .order("created_at", { ascending: false })
       .then(({ data }) => setProjects((data as Project[]) ?? []));
   }, []);
@@ -590,6 +591,11 @@ const Reports = () => {
     setReportEvidenceCards([]);
     setReportVerification(null);
   }, [pid]);
+
+  // 口径确认是项目级决定：进入项目就带出已经定过的，不必每次重选。
+  useEffect(() => {
+    setIssueAnswers((project?.wording_decisions as Record<string, string>) ?? {});
+  }, [pid, project?.wording_decisions]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1131,6 +1137,25 @@ const Reports = () => {
     if (!repaired) return false;
     toast.info(`已重新解析 ${repaired}/${targets.length} 份未通过核验的资料，正在重试生成`);
     return true;
+  };
+
+  /** 确认口径并写回项目：这是项目级决定，不该只活在当前页面里。 */
+  const confirmWording = async (code: string, option: string) => {
+    const next = { ...issueAnswers, [code]: option };
+    setIssueAnswers(next);
+    if (!project?.id) return;
+    const { error } = await (supabase as any)
+      .from("projects")
+      .update({ wording_decisions: next })
+      .eq("id", project.id);
+    if (error) {
+      toast.error(`口径未能保存：${error.message}`);
+      return;
+    }
+    setProjects((prev) => prev.map((item) =>
+      item.id === project.id ? { ...item, wording_decisions: next } : item
+    ));
+    toast.success("口径已确认并保存到本项目");
   };
 
   const generate = async () => {
@@ -1721,8 +1746,7 @@ const Reports = () => {
                                       className="mt-0.5"
                                       name={`issue-${issue.code}`}
                                       checked={issueAnswers[issue.code] === option}
-                                      onChange={() =>
-                                        setIssueAnswers((prev) => ({ ...prev, [issue.code]: option }))}
+                                      onChange={() => confirmWording(issue.code, option)}
                                     />
                                     <span>{option}</span>
                                   </label>
@@ -1730,7 +1754,7 @@ const Reports = () => {
                               </div>
                               {issueAnswers[issue.code] && (
                                 <p className="mt-1.5 text-[11px] text-success">
-                                  已确认，下次生成将按此口径撰写
+                                  已确认并保存到本项目，后续生成都按此口径撰写
                                 </p>
                               )}
                             </div>
