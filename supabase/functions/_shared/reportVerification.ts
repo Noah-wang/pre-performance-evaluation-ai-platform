@@ -8,6 +8,9 @@ export interface ReportVerificationIssue {
   title: string;
   detail: string;
   sourceNames?: string[];
+  /** 需要人工拍板的口径问题：给出问题和候选口径，由使用者选择后写入生成指令。 */
+  question?: string;
+  options?: string[];
 }
 
 export interface ReportFileVerification {
@@ -54,7 +57,12 @@ export interface ReportVerificationDossier {
   };
   fileReviews?: ReportFileVerification[];
   dimensionReviews?: ReportDimensionVerification[];
-  conflicts?: string[];
+  conflicts?: Array<{
+    code: string;
+    detail: string;
+    question: string;
+    options: string[];
+  }>;
   targetFacts?: AuthoritativeTargetFact[];
   sourceNames?: string[];
   corpus?: string;
@@ -165,12 +173,16 @@ export const verifyReportPreflight = (
     });
   }
 
-  if (dossier.conflicts?.length) {
+  // 口径冲突不该只抛一段文字让人自己琢磨：每条都带上问题和候选口径，
+  // 使用者选定后作为生成指令写进报告，避免模型自行挑一个版本。
+  for (const conflict of dossier.conflicts ?? []) {
     issues.push({
-      code: "SOURCE_CONFLICTS",
+      code: conflict.code || "SOURCE_CONFLICTS",
       severity: "warning",
-      title: "资料存在口径冲突",
-      detail: dossier.conflicts.join("；"),
+      title: "资料存在口径冲突，需人工确认",
+      detail: conflict.detail,
+      question: conflict.question,
+      options: conflict.options,
     });
   }
 

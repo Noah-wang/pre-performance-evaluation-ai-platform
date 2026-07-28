@@ -6,6 +6,8 @@ export interface ReportVerificationIssue {
   title: string;
   detail: string;
   sourceNames?: string[];
+  question?: string;
+  options?: string[];
 }
 
 export interface ReportFileVerification {

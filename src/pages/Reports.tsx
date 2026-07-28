@@ -366,6 +366,7 @@ const Reports = () => {
   const [generating, setGenerating] = useState(false);
   const [generationStage, setGenerationStage] = useState<ReportGenerationStage | null>(null);
   const [editorToolbarSlot, setEditorToolbarSlot] = useState<HTMLDivElement | null>(null);
+  const [issueAnswers, setIssueAnswers] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [rects, setRects] = useState<Rectification[]>(cachedWorkspace?.rects ?? []);
   const [generatingRect, setGeneratingRect] = useState(false);
@@ -1170,6 +1171,14 @@ const Reports = () => {
       const generationStrictInstruction = buildStrictReportPrompt(generationDimensions);
       const generationIndicatorInstruction = buildReportIndicatorInstruction(generationIndicators);
 
+      // 使用者对口径冲突的选择要写进生成指令，否则模型只能自己挑一个版本。
+      const confirmedWordings = Object.entries(issueAnswers).filter(([, value]) => value);
+      const confirmedWordingInstruction = confirmedWordings.length
+        ? `【已人工确认的口径，必须严格遵守】\n${
+          confirmedWordings.map(([, value], index) => `${index + 1}. ${value}`).join("\n")
+        }`
+        : "";
+
       if (project.id) await repairUnindexedMaterials(project.id);
 
       setGenerationStage({ label: "正在核验资料并检索证据" });
@@ -1187,6 +1196,7 @@ const Reports = () => {
             generationStrictInstruction,
             generationIndicatorInstruction,
             economicAnalysis,
+            confirmedWordingInstruction,
             extra.trim(),
           ].filter(Boolean).join("\n\n"),
         }),
@@ -1871,17 +1881,52 @@ const Reports = () => {
                     </div>
                   )}
                   {reportVerification.issues.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      {reportVerification.issues.slice(0, 4).map((issue) => (
-                        <p key={`${issue.code}:${issue.detail}`} className="leading-relaxed">
-                          <span className="font-medium">{issue.title}：</span>{issue.detail}
-                          {issue.sourceNames?.length ? (
-                            <span className="block text-muted-foreground">
-                              涉及资料：{issue.sourceNames.slice(0, 6).join("、")}
-                            </span>
+                    <div className="mt-2 space-y-2">
+                      {reportVerification.issues.slice(0, 6).map((issue) => (
+                        <div key={`${issue.code}:${issue.detail}`} className="leading-relaxed">
+                          <p>
+                            <span className="font-medium">{issue.title}：</span>{issue.detail}
+                            {issue.sourceNames?.length ? (
+                              <span className="block text-muted-foreground">
+                                涉及资料：{issue.sourceNames.slice(0, 6).join("、")}
+                              </span>
+                            ) : null}
+                          </p>
+                          {issue.question && issue.options?.length ? (
+                            <div className="mt-1.5 rounded border border-accent/30 bg-background/70 p-2">
+                              <p className="font-medium text-foreground">{issue.question}</p>
+                              <div className="mt-1.5 space-y-1">
+                                {issue.options.map((option) => (
+                                  <label
+                                    key={option}
+                                    className="flex cursor-pointer items-start gap-2 text-muted-foreground hover:text-foreground"
+                                  >
+                                    <input
+                                      type="radio"
+                                      className="mt-0.5"
+                                      name={`issue-${issue.code}`}
+                                      checked={issueAnswers[issue.code] === option}
+                                      onChange={() =>
+                                        setIssueAnswers((prev) => ({ ...prev, [issue.code]: option }))}
+                                    />
+                                    <span>{option}</span>
+                                  </label>
+                                ))}
+                              </div>
+                              {issueAnswers[issue.code] && (
+                                <p className="mt-1.5 text-[11px] text-success">
+                                  已确认，下次生成将按此口径撰写
+                                </p>
+                              )}
+                            </div>
                           ) : null}
-                        </p>
+                        </div>
                       ))}
+                      {reportVerification.issues.some((issue) => issue.options?.length) && (
+                        <p className="text-[11px] text-muted-foreground">
+                          选定口径后重新生成报告即可生效；未选择时模型不会自行统一版本，会按各份资料分别表述。
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>

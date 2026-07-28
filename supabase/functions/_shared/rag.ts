@@ -977,7 +977,7 @@ export interface ReportRagDossier {
     resolvedProjectId: string | null;
   };
   fileCards: ReportEvidenceCard[];
-  conflicts: string[];
+  conflicts: DossierConflict[];
   sourceAliases: SourceAliasMap;
   sourceAliasCandidates: SourceAliasCandidates;
   serviceProviders: ServiceProviderMention[];
@@ -1033,12 +1033,19 @@ const pickRepresentativeChunks = (chunks: any[], terms: string[], limit = 4) => 
     .slice(0, limit);
 };
 
+export interface DossierConflict {
+  code: string;
+  detail: string;
+  question: string;
+  options: string[];
+}
+
 const detectDossierConflicts = (files: any[], chunks: any[]) => {
   const corpus = [
     ...files.map((file: any) => [file.title, file.file_name, file.category, file.summary].filter(Boolean).join(" ")),
     ...chunks.map((chunk: any) => [chunk.title, chunk.file_name, chunk.category, chunk.content].filter(Boolean).join(" ")),
   ].join("\n");
-  const conflicts: string[] = [];
+  const conflicts: DossierConflict[] = [];
   const standards = new Map<string, Set<string>>();
   const standardPattern = /((?:DA\/?\s*T|DAT|GB\/?\s*T|GB|DB\d+\/?\s*T|ISO)\s*[\w./]+)\s*[—－-]\s*(20\d{2})/gi;
   for (const match of corpus.matchAll(standardPattern)) {
@@ -1051,10 +1058,30 @@ const detectDossierConflicts = (files: any[], chunks: any[]) => {
   }
   for (const [standard, versions] of standards) {
     if (versions.size <= 1) continue;
-    conflicts.push(`资料中同时出现 ${standard} 的多个年份版本（${Array.from(versions).sort().join("、")}）；报告必须按具体上传文件说明版本口径，不得自行替换或默认采用某一版本。`);
+    const years = Array.from(versions).sort();
+    conflicts.push({
+      code: `STANDARD_VERSION:${standard}`,
+      detail: `资料中同时出现 ${standard} 的多个年份版本（${years.join("、")}）；报告必须按具体上传文件说明版本口径，不得自行替换或默认采用某一版本。`,
+      question: `${standard} 应按哪个版本口径撰写？`,
+      options: [
+        ...years.map((year) => `以 ${standard}-${year} 为准`),
+        "按各份资料各自载明的版本分别表述，不做统一",
+      ],
+    });
   }
   if (/政府采购流程|招投标|公开招标/.test(corpus) && /询价|延续使用|未再次三方比价|未再次比价/.test(corpus)) {
-    conflicts.push("采购方式存在泛化表述风险：资料中出现询价、延续使用原服务商或未再次比价等口径时，报告不得笼统写成“按政府采购流程遴选服务商”。");
+    conflicts.push({
+      code: "PROCUREMENT_WORDING",
+      detail: "采购方式存在泛化表述风险：资料中出现询价、延续使用原服务商或未再次比价等口径时，报告不得笼统写成“按政府采购流程遴选服务商”。",
+      question: "本项目的采购方式应如何表述？",
+      options: [
+        "询价采购",
+        "延续使用原服务商，未再次比价",
+        "单一来源采购",
+        "公开招标",
+        "资料未明确，写为“采购方式待补充说明”",
+      ],
+    });
   }
   return conflicts;
 };
@@ -1449,7 +1476,7 @@ export const buildReportRagDossier = async (
     : "";
   const hardFactText = formatHardFactClaims(hardFactClaims);
   const conflictText = conflicts.length
-    ? conflicts.map((item, index) => `${index + 1}. ${item}`).join("\n")
+    ? conflicts.map((item, index) => `${index + 1}. ${item.detail}`).join("\n")
     : "";
   const directFactText = allFacts.length
     ? allFacts.map((item, index) => `${index + 1}. ${item.fact}（来源：${item.source}；类型：${item.category}）`).join("\n")
@@ -1512,7 +1539,7 @@ export const buildReportRagDossier = async (
     targetRegisterText,
     "【零、硬事实卡片与禁止否认清单】",
     formatHardFactClaims(hardFactClaims),
-    conflicts.length ? `【零-A、冲突口径与强制修正】\n${conflicts.map((item, index) => `${index + 1}. ${item}`).join("\n")}` : "",
+    conflicts.length ? `【零-A、冲突口径与强制修正】\n${conflicts.map((item, index) => `${index + 1}. ${item.detail}`).join("\n")}` : "",
     "【一、逐文件证据清单】",
     perFileText || "当前项目暂无可直接引用的 Word/Excel 正文资料。",
     "【二、可直接核验的事实/数据】",
