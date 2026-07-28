@@ -150,7 +150,7 @@ const callReportSection = async (
         stream: false,
         max_tokens: maxTokens,
         temperature: 0.15,
-      }, { timeoutMs: 85000 });
+      }, { timeoutMs: Math.round(reportTimeoutMs() * 0.8) });
       if (!response.ok) {
         lastError = `${response.status} ${await response.text()}`;
       } else {
@@ -216,6 +216,11 @@ const readAIStream = async (response: Response, onDelta: (content: string) => vo
   return output.trim();
 };
 
+const reportTimeoutMs = () => {
+  const parsed = Number(Deno.env.get("AI_REPORT_TIMEOUT_MS") ?? "");
+  return Number.isFinite(parsed) && parsed >= 30_000 ? parsed : 280_000;
+};
+
 const callReportSectionStream = async (
   system: string,
   user: string,
@@ -230,14 +235,25 @@ const callReportSectionStream = async (
     stream: true,
     max_tokens: maxTokens,
     temperature: 0.15,
-  }, { timeoutMs: 110000 });
+    // 写满一章要按十几条规则组织几千字，实测常超过两分钟。超时会中断流，
+    // readAIStream 拿到空串后抛"AI 返回空内容"，看起来像模型没响应，其实是
+    // 我们自己掐断的。可通过 AI_REPORT_TIMEOUT_MS 调整。
+  }, { timeoutMs: reportTimeoutMs() });
 
   if (!response.ok) {
     throw new Error(`${response.status} ${await response.text()}`);
   }
 
-  const text = await readAIStream(response, onDelta);
-  if (!text.trim()) throw new Error("AI 返回空内容");
+  let text = "";
+  try {
+    text = await readAIStream(response, onDelta);
+  } catch (error) {
+    // 超时/连接中断在这里表现为读流失败。之前一律吞掉再报"AI 返回空内容"，
+    // 排查时会误以为是模型不回内容。
+    const message = String((error as { message?: unknown })?.message ?? error);
+    throw new Error(`AI 流式响应中断：${message}`);
+  }
+  if (!text.trim()) throw new Error("AI 返回空内容（模型未产出任何文字）");
   return text;
 };
 
