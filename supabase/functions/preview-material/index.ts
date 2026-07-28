@@ -24,13 +24,41 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    const { data: cachedFile } = await supabase
+      .from("knowledge_files")
+      .select("id,status")
+      .eq("file_path", filePath)
+      .eq("status", "indexed")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (cachedFile?.id) {
+      const { data: chunks } = await supabase
+        .from("knowledge_chunks")
+        .select("content")
+        .eq("file_id", cachedFile.id)
+        .order("chunk_index", { ascending: true })
+        .limit(100);
+      const cachedText = (chunks ?? [])
+        .map((chunk: { content?: string | null }) => String(chunk.content ?? "").trim())
+        .filter(Boolean)
+        .join("\n\n")
+        .slice(0, 120_000);
+      if (cachedText) {
+        return new Response(JSON.stringify({ text: cachedText, cached: true }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
     const text = await extractMaterialText(supabase, {
       file_path: filePath,
       file_name: fileName,
       review_note: reviewNote,
     });
 
-    return new Response(JSON.stringify({ text }), {
+    return new Response(JSON.stringify({ text, cached: false }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {

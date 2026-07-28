@@ -43,6 +43,10 @@ type ChatPayload = Record<string, unknown> & {
   model?: string;
 };
 
+interface CallAIOptions {
+  timeoutMs?: number;
+}
+
 const readEnv = (key: string) => {
   const value = Deno.env.get(key)?.trim();
   return value ? value : null;
@@ -102,10 +106,13 @@ const shouldDisableThinking = (endpoint: string, model: string) => {
   return lowerEndpoint.includes("aliyuncs.com") || lowerModel.includes("qwen");
 };
 
-export const callAI = (useCase: AIUseCase, payload: ChatPayload) => {
+export const callAI = (useCase: AIUseCase, payload: ChatPayload, options: CallAIOptions = {}) => {
   const endpoint = getAIEndpoint(useCase);
   const apiKey = getAIKey(useCase);
   const model = resolveAIModel(useCase, typeof payload.model === "string" ? payload.model : undefined);
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs ?? 90000));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("AI request timeout"), timeoutMs);
   const normalizedPayload = {
     ...payload,
     model,
@@ -121,5 +128,6 @@ export const callAI = (useCase: AIUseCase, payload: ChatPayload) => {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(normalizedPayload),
-  });
+    signal: controller.signal,
+  }).finally(() => clearTimeout(timeout));
 };

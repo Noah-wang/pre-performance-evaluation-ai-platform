@@ -1,7 +1,6 @@
 // AI Meeting Minutes Analyzer — extracts expert opinions by category
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { callAI } from "../_shared/ai.ts";
-import { buildProjectKnowledgeContext, isEvidenceSupported } from "../_shared/rag.ts";
+import { isEvidenceSupported } from "../_shared/rag.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -28,7 +27,6 @@ const cleanConclusion = (value: unknown) =>
 const formatEvidenceConstrainedSummary = (
   dimensions: unknown,
   meetingCorpus: string,
-  materialCorpus: string,
 ) => {
   const rows = Array.isArray(dimensions) ? dimensions : [];
   const byName = new Map<string, any>();
@@ -43,41 +41,31 @@ const formatEvidenceConstrainedSummary = (
     const sourceType = String(item?.sourceType ?? "none");
     const evidence = String(item?.evidence ?? "").trim();
     const conclusion = cleanConclusion(item?.conclusion);
-    const corpus = sourceType === "meeting"
-      ? meetingCorpus
-      : sourceType === "material" || sourceType === "economicEvidence"
-        ? materialCorpus
-        : "";
-    const supported = Boolean(conclusion) && isEvidenceSupported(evidence, corpus);
+    const supported = sourceType === "meeting"
+      && Boolean(conclusion)
+      && isEvidenceSupported(evidence, meetingCorpus);
 
     if (!supported) {
       return [
         `${index + 1}.${dimension}`,
-        "会议纪要未形成该维度明确意见，需补充对应证明材料或专家意见。",
+        "会议转写和纪要原文未形成该维度明确意见，暂不生成判断结论。",
       ];
     }
 
     supportedCount += 1;
-    if (sourceType !== "meeting") {
-      return [
-        `${index + 1}.${dimension}`,
-        `会议纪要未形成该维度明确意见；根据资料显示，${conclusion}。该内容仅作为资料补证线索，不作为专家会议发言。`,
-      ];
-    }
-    const prefix = "根据会议发言";
     return [
       `${index + 1}.${dimension}`,
-      `${prefix}，${conclusion}。`,
+      `根据会议发言，${conclusion}。`,
     ];
   });
 
   lines.push(
     "总体意见：",
     supportedCount > 0
-      ? `根据现有会议纪要和资料摘录，已形成 ${supportedCount} 个维度的初步判断；其余维度仍需补充直接依据后再确定最终支持倾向。`
-      : "根据现有会议纪要和资料摘录，暂未形成足以支撑完整预评估结论的直接依据，需补充明确专家意见或证明材料。",
+      ? `根据现有会议转写和纪要原文，已形成 ${supportedCount} 个维度的初步判断；其余维度因会议原文依据不足，暂不作扩展判断。`
+      : "根据现有会议转写和纪要原文，暂未形成足以支撑完整预评估结论的直接依据。",
     "其他问题和建议：",
-    "1. 后续完善意见时，应逐项补充会议发言或项目资料中的直接依据，避免将通用判断写成专家意见。",
+    "1. 后续完善意见时，应以会议发言或人工补充纪要为准，避免将未在会议中出现的通用判断写成专家意见。",
   );
 
   return lines.join("\n");
@@ -87,7 +75,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
-    const { content, title, projectName, economicEvidence } = await req.json();
+    const { content, title, projectName } = await req.json();
     if (typeof content !== "string" || !content.trim()) {
       return new Response(JSON.stringify({ error: "纪要内容不能为空" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -98,15 +86,6 @@ Deno.serve(async (req) => {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-
-    const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const knowledge = projectName
-      ? await buildProjectKnowledgeContext(
-        sb,
-        { name: projectName },
-        [title, typeof economicEvidence === "string" ? economicEvidence : ""].filter(Boolean).join(" "),
-      )
-      : { text: "", stats: { materialSnippets: 0, historicalReports: 0, goalTargets: 0 } };
 
     const systemPrompt = `你是一位专业的政府事前绩效评估秘书，擅长从评估会议纪要中按"业务专家 / 管理专家 / 财务专家"三类抽取每位专家的核心观点。
 
@@ -129,14 +108,14 @@ Deno.serve(async (req) => {
 （给出支持倾向及核心理由）
 其他问题和建议：
 （逐条提出可执行建议）
-5. 每个维度只能引用“会议纪要原文”中明确出现的发言、或“项目资料与历史参考”中明确对应当前项目的材料摘录。不得为了填满五个维度而自行补充常识性判断。
+5. 每个维度只能引用“会议纪要原文”中明确出现的发言。不得引用项目资料、历史项目、目标库、常识或你自己的推断。
 6. evidence 必须尽量摘录原文中的连续句子或短语，不能写总结句；如果找不到直接依据，sourceType 必须为 none，evidence 和 conclusion 均留空。
-7. 只有 sourceType=meeting 时，conclusion 才能写“专家/主持人/会议认为”的含义；sourceType=material 时只能表达“资料显示”，不得伪装成会议发言。sourceType=material 的内容在最终 summary 中会被标记为“资料补证线索”，不能作为会议意见。
-8. 如果某个维度会议纪要没有明确发言，且项目资料摘录也没有直接证据，必须让该维度 sourceType=none，不得生成具体评价结论。
-9. 严禁生成会议纪要和资料中都没有出现的表述，例如“绩效目标可以再详细”“进度安排的精细性”“资金使用效率的可评价性”等，除非原文 evidence 中明确出现同义内容。
+7. 只有 sourceType=meeting 时，conclusion 才能写“专家/主持人/会议认为”的含义；本功能不允许 sourceType=material。
+8. 如果某个维度会议纪要没有明确发言，必须让该维度 sourceType=none，不得生成具体评价结论。
+9. 严禁生成会议纪要中没有出现的表述，例如“绩效目标可以再详细”“进度安排的精细性”“资金使用效率的可评价性”等，除非原文 evidence 中明确出现同义内容。
 10. 不得虚构纪要中没有出现的政策名称、金额、日期或专家意见；信息不足时明确写“根据现有资料无法确认”。
-11. 如用户提供“项目经济性客观证据”，必须将其中有来源的预算明细、参考价格、可比性调整、合理金额和节约空间写入“3.项目经济性”；无客观来源的预算项只能披露证据不足，不得自行补价格。
-12. summary 不使用 Markdown，不使用项目符号，不输出重复标题；每个维度最多 2 句，优先写“依据来源 + 判断 + 待补证点”。若会议原文没有提到某个结论，不得写“专家指出/专家认为/会议认为”。
+11. summary 不使用 Markdown，不使用项目符号，不输出重复标题；每个维度最多 2 句，优先写“依据来源 + 判断 + 待补证点”。若会议原文没有提到某个结论，不得写“专家指出/专家认为/会议认为”。
+12. 如果会议只是测试、寒暄、转写样例，summary 必须说明“会议纪要内容不足，暂不能形成正式预评估意见”，不要编造五个维度的完整判断。
 
 类别判断要点：
 - 业务专家：聚焦项目内容、技术方案、行业经验
@@ -153,20 +132,9 @@ Deno.serve(async (req) => {
 ${content}
 """
 
-${knowledge.text ? `项目资料与历史参考：
-"""
-${knowledge.text}
-"""
-
-` : ""}项目经济性客观证据：
-"""
-${typeof economicEvidence === "string" && economicEvidence.trim() ? economicEvidence : "未提供预算明细成本分析。"}
-"""
-
 补充要求：
-1. 如“项目资料与历史参考”提供了当前项目材料摘录，可据此辅助判断哪些意见已有资料支撑、哪些仍需补证；引用时必须写成“根据资料显示/资料显示”，不能写成“专家认为”。
-2. 历史项目与目标库内容仅可作为论证线索，不得当作当前会议已确认的事实直接引用。
-3. 如果会议只是测试、寒暄、转写样例，summary 必须说明“会议纪要内容不足，暂不能形成正式预评估意见”，不要编造五个维度的完整判断。
+1. 只允许使用上面的会议纪要原文，不允许使用项目资料、历史项目、目标库或常识补写。
+2. 如果会议只是测试、寒暄、转写样例，summary 必须说明“会议纪要内容不足，暂不能形成正式预评估意见”，不要编造五个维度的完整判断。
 
 请严格按照工具 schema 输出结构化结果。`;
 
@@ -237,8 +205,8 @@ ${typeof economicEvidence === "string" && economicEvidence.trim() ? economicEvid
                       },
                       sourceType: {
                         type: "string",
-                        enum: ["meeting", "material", "economicEvidence", "none"],
-                        description: "依据来源：会议纪要、项目资料、经济性证据，或无直接依据",
+                        enum: ["meeting", "none"],
+                        description: "依据来源：会议纪要，或无直接依据",
                       },
                       evidence: {
                         type: "string",
@@ -289,21 +257,21 @@ ${typeof economicEvidence === "string" && economicEvidence.trim() ? economicEvid
       });
     }
     const args = JSON.parse(toolCall.function.arguments);
-    const materialCorpus = [knowledge.text, typeof economicEvidence === "string" ? economicEvidence : ""].filter(Boolean).join("\n");
-    const constrainedSummary = formatEvidenceConstrainedSummary(args.dimensions, content, materialCorpus);
+    const constrainedSummary = formatEvidenceConstrainedSummary(args.dimensions, content);
 
     return new Response(JSON.stringify({
       ...args,
       summary: constrainedSummary,
-      injected: knowledge.stats,
+      injected: { meetingOnly: true, materialSnippets: 0, historicalReports: 0, goalTargets: 0 },
     }), {
       headers: {
         ...corsHeaders,
         "Content-Type": "application/json",
-        "X-Rag-Knowledge": String((knowledge.stats as any).knowledgeSnippets ?? 0),
-        "X-Rag-Materials": String(knowledge.stats.materialSnippets ?? 0),
-        "X-Rag-History": String(knowledge.stats.historicalReports ?? 0),
-        "X-Rag-Goals": String(knowledge.stats.goalTargets ?? 0),
+        "X-Meeting-Only": "true",
+        "X-Rag-Knowledge": "0",
+        "X-Rag-Materials": "0",
+        "X-Rag-History": "0",
+        "X-Rag-Goals": "0",
       },
     });
   } catch (e) {

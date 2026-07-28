@@ -98,6 +98,52 @@ export const createTextEmbeddingAsync = async (text: string) => {
   }
 };
 
+export const createTextEmbeddingsAsync = async (texts: string[], batchSize = 8) => {
+  const endpoint = externalEmbeddingEndpoint();
+  const apiKey = externalEmbeddingKey();
+  const model = readEnv("AI_EMBEDDING_MODEL") ?? "text-embedding-v4";
+  const normalizedTexts = texts.map((text) => String(text ?? "").slice(0, 8000));
+
+  if (!normalizedTexts.length) return [];
+  if (!endpoint || !apiKey) return normalizedTexts.map((text) => createTextEmbedding(text));
+
+  const vectors: number[][] = [];
+  for (let index = 0; index < normalizedTexts.length; index += batchSize) {
+    const batch = normalizedTexts.slice(index, index + batchSize);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          input: batch,
+          dimensions: DIMENSIONS,
+        }),
+      });
+      if (!response.ok) throw new Error(`embedding batch ${response.status}: ${await response.text()}`);
+      const json = await response.json();
+      const data = Array.isArray(json.data) ? json.data : [];
+      if (data.length !== batch.length) throw new Error("embedding batch response size mismatch");
+      vectors.push(
+        ...data.map((item: any, itemIndex: number) => {
+          const raw = item?.embedding;
+          return Array.isArray(raw) && raw.length
+            ? normalizeVector(raw.map((value: unknown) => Number(value)))
+            : createTextEmbedding(batch[itemIndex]);
+        }),
+      );
+    } catch (error) {
+      console.warn("external embedding batch failed; falling back to local hash embedding", error);
+      vectors.push(...batch.map((text) => createTextEmbedding(text)));
+    }
+  }
+
+  return vectors;
+};
+
 export const vectorLiteral = (embedding: number[]) =>
   `[${embedding.map((value) => Number.isFinite(value) ? value : 0).join(",")}]`;
 

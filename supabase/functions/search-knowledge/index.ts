@@ -112,7 +112,7 @@ const mergeRetrievalResults = (vectorRows: any[], keywordRows: any[], queryToken
         keyword_similarity: keywordScore,
         matched_terms: terms,
         match_reason: reasonParts.join("；") || "系统综合排序命中",
-        source_location: `《${item.title || item.file_name || "资料文件"}》第 ${Number(item.chunk_index ?? 0) + 1} 个片段`,
+        source_location: `《${item.file_name || item.title || "资料文件"}》第 ${Number(item.chunk_index ?? 0) + 1} 个片段`,
         hybrid_score: hybridScore,
       };
     })
@@ -180,7 +180,7 @@ Deno.serve(async (req) => {
     }
 
     const vectorSourceText = hits.map((hit: any) =>
-      `[${hit.rank}]《${hit.title || hit.file_name}》${hit.category ? `（${hit.category}）` : ""}\n${hit.content}`
+      `[${hit.rank}]《${hit.file_name || hit.title}》${hit.category ? `（${hit.category}）` : ""}\n${hit.content}`
     ).join("\n\n");
     const sourceText = [
       vectorSourceText
@@ -229,7 +229,7 @@ Deno.serve(async (req) => {
       finalAnswer = hits.length
         ? `已检索到 ${hits.length} 条相关资料片段。请优先查看：${hits
           .slice(0, 3)
-          .map((hit: any) => `[${hit.rank}]《${hit.title || hit.file_name}》`)
+          .map((hit: any) => `[${hit.rank}]《${hit.file_name || hit.title}》`)
           .join("、")}。`
         : "已读取当前项目资料，但 AI 暂未生成可用回答。请换一个更具体的问题重试。";
     }
