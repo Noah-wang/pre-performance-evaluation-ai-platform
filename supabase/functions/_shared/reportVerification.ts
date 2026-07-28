@@ -216,6 +216,51 @@ const targetFactPresent = (report: string, fact: AuthoritativeTargetFact) => {
   );
 };
 
+
+// 报告里出现的"依据"分两种：上传资料的文件名，以及法规/标准/办法/目录这类
+// 外部权威名称。前者已有清单可比对，后者最容易被凭空造出来——模型需要给某个
+// 单价或结论找背书时，会写出一个听起来正规、但资料里根本不存在的出处。
+const CITATION_PATTERN = /[《""]([^》""]{4,60})[》""]/g;
+// 只追究"外部权威依据"这一类：法律法规、国标行标、管理办法、采购目录。
+// "方案""意见""制度"这类词大量出现在上传资料的文件名里（实施方案.docx、
+// 专家意见书.docx），纳入判定会把真实资料误报成编造。
+const EXTERNAL_AUTHORITY = /法$|法律|条例|办法|规范|标准|准则|细则|指南|目录|号令|通知$/;
+// 带扩展名的一律是上传文件，不属于外部权威依据。
+const UPLOADED_FILE_NAME = /\.(?:docx?|xlsx?|xlsm|xlsb|csv|pdf|png|jpe?g|txt)$/i;
+
+const citationKey = (value: string) =>
+  String(value ?? "")
+    .replace(/\.(docx?|xlsx?|xlsm|xlsb|csv|pdf|png|jpe?g|txt)$/i, "")
+    .replace(/[\s《》""''（）()【】\[\]：:，,。；;、_-]/g, "")
+    .toLowerCase();
+
+/** 挑出报告里引用了、但资料中查无此名的出处。 */
+const unsupportedCitations = (report: string, dossier: ReportVerificationDossier) => {
+  const known = new Set<string>();
+  for (const name of dossier.sourceNames ?? []) {
+    const key = citationKey(name);
+    if (key) known.add(key);
+  }
+  // 语料里出现过的名称同样算有据可查：政策依据常写在资料正文里而非文件名。
+  const corpus = String(dossier.corpus ?? "");
+  const corpusKey = citationKey(corpus);
+
+  const seen = new Set<string>();
+  const suspects: string[] = [];
+  for (const match of String(report ?? "").matchAll(CITATION_PATTERN)) {
+    const raw = String(match[1] ?? "").trim();
+    const key = citationKey(raw);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    if (known.has(key)) continue;
+    if (corpusKey.includes(key)) continue;
+    if (UPLOADED_FILE_NAME.test(raw)) continue;
+    if (!EXTERNAL_AUTHORITY.test(raw)) continue;
+    suspects.push(raw);
+  }
+  return suspects;
+};
+
 export const verifyFinalReport = (
   report: string,
   dossier: ReportVerificationDossier,
@@ -266,9 +311,20 @@ export const verifyFinalReport = (
   if (unsupportedSignals.length) {
     issues.push({
       code: "UNSUPPORTED_NUMERIC_CLAIMS",
-      severity: "warning",
+      severity: "error",
       title: "报告存在无法回溯到资料的数字或标准号",
-      detail: `${unsupportedSignals.slice(0, 12).join("、")}。请在定稿前核对其来源；系统不会把这些数字静默判定为可靠事实。`,
+      detail: `${unsupportedSignals.slice(0, 12).join("、")}。这些数字在项目资料中查不到出处，定稿前必须核实或删除。`,
+    });
+  }
+
+  const fabricatedCitations = unsupportedCitations(text, dossier);
+  if (fabricatedCitations.length) {
+    issues.push({
+      code: "UNSUPPORTED_CITATIONS",
+      severity: "error",
+      title: "报告引用了资料中不存在的依据",
+      detail: `${fabricatedCitations.slice(0, 8).join("、")}。这些名称在已上传资料和正文中均未出现，属于模型自行引用的外部依据，定稿前必须核实或删除。`,
+      sourceNames: fabricatedCitations.slice(0, 8),
     });
   }
 

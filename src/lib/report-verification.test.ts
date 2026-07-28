@@ -79,7 +79,7 @@ describe("comprehensive report verification", () => {
     expect(result.issues.some((issue) => issue.code === "MISSING_AUTHORITATIVE_TARGETS")).toBe(true);
   });
 
-  it("flags an unsupported number for review without silently trusting it", () => {
+  it("blocks finalizing when a number cannot be traced back to the materials", () => {
     const report = `一、评估对象
 项目预算90.2万元。
 二、评估方式和方法
@@ -89,7 +89,40 @@ describe("comprehensive report verification", () => {
 四、相关建议`;
     const result = verifyFinalReport(report, dossier);
 
-    expect(result.status).toBe("needs_review");
+    // 查无出处的数字会被当成事实读，只提示不拦截等于放行。这里阻断的是定稿，
+    // 正文照常生成，人核实修改后即可定稿。
+    expect(result.status).toBe("blocked");
     expect(result.issues.some((issue) => issue.code === "UNSUPPORTED_NUMERIC_CLAIMS")).toBe(true);
+  });
+
+  it("blocks finalizing when the report cites a source that does not exist", () => {
+    const report = `一、评估对象
+项目预算90.2万元。
+二、评估方式和方法
+三、评估内容与结论
+（一）项目必要性
+单价符合《中央财政档案事务补助资金管理办法》规定的区间。
+四、相关建议`;
+    const result = verifyFinalReport(report, dossier);
+
+    expect(result.status).toBe("blocked");
+    const issue = result.issues.find((item) => item.code === "UNSUPPORTED_CITATIONS");
+    expect(issue?.detail).toContain("中央财政档案事务补助资金管理办法");
+  });
+
+  it("does not flag citations that appear in the uploaded materials", () => {
+    const report = `一、评估对象
+项目预算90.2万元。
+二、评估方式和方法
+三、评估内容与结论
+（一）项目必要性
+依据《中华人民共和国档案法》开展存储管理。
+四、相关建议`;
+    const result = verifyFinalReport(
+      report,
+      { ...dossier, corpus: `${dossier.corpus ?? ""}\n依据中华人民共和国档案法执行。` },
+    );
+
+    expect(result.issues.some((item) => item.code === "UNSUPPORTED_CITATIONS")).toBe(false);
   });
 });

@@ -1523,7 +1523,10 @@ Deno.serve(async (req) => {
         }
         const finalVerification = verifyFinalReport(confirmedDraft, ragDossier as any);
         controller.enqueue(encoder.encode(sseVerification(finalVerification)));
-        if (finalVerification.status === "blocked") {
+        // 终稿核验发现问题时不能丢弃正文：内容本身是有价值的，需要人来核对和
+        // 修改。真正该拦住的是"定稿"，前端据 verification.status 决定。
+        // 只有连正文都没生成出来才算失败。
+        if (!confirmedDraft.trim()) {
           controller.enqueue(encoder.encode(sseError(finalVerification.summary)));
           controller.close();
           return;

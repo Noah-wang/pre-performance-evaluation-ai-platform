@@ -375,6 +375,9 @@ const Reports = () => {
   const [wordingDialogOpen, setWordingDialogOpen] = useState(false);
   const [pendingWordingIssues, setPendingWordingIssues] = useState<ReportVerificationIssue[]>([]);
   const [wordingDraft, setWordingDraft] = useState<Record<string, string>>({});
+  // setState 是异步的：确认后立刻调用 generate()，闭包里读到的仍是旧值，
+  // 于是又被判为"未确认"再弹一次窗。用 ref 同步记录最新确认结果。
+  const issueAnswersRef = useRef<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [rects, setRects] = useState<Rectification[]>(cachedWorkspace?.rects ?? []);
   const [generatingRect, setGeneratingRect] = useState(false);
@@ -665,7 +668,9 @@ const Reports = () => {
 
   // 口径确认是项目级决定：进入项目就带出已经定过的，不必每次重选。
   useEffect(() => {
-    setIssueAnswers((project?.wording_decisions as Record<string, string>) ?? {});
+    const saved = (project?.wording_decisions as Record<string, string>) ?? {};
+    issueAnswersRef.current = saved;
+    setIssueAnswers(saved);
   }, [pid, project?.wording_decisions]);
 
   const annotateReportCitations = async (html: string, options?: { silent?: boolean; force?: boolean }) => {
@@ -787,6 +792,13 @@ const Reports = () => {
   );
   const currentReport = history.find((item) => item.id === currentReportId) ?? null;
   const isCurrentFinalized = currentReport?.status === "finalized";
+  // 终稿核验发现"查无出处的数字/引用"时拦住定稿——正文可以继续编辑，
+  // 但不允许把未经核实的内容定为终稿。
+  const finalizeBlockedReason = reportVerification?.phase === "final"
+      && reportVerification.status === "blocked"
+    ? reportVerification.issues.find((issue) => issue.severity === "error")?.title
+      ?? "终稿核验未通过"
+    : "";
   const projectRedlinePreferenceKey = useMemo(
     () => (pid ? `reports:redline-template:${pid}` : null),
     [pid],
@@ -1149,6 +1161,7 @@ const Reports = () => {
 
   /** 批量保存口径：弹窗里一次确认多项。 */
   const saveWordingDecisions = async (next: Record<string, string>) => {
+    issueAnswersRef.current = next;
     setIssueAnswers(next);
     if (!project?.id) return true;
     const { error } = await (supabase as any)
@@ -1168,7 +1181,8 @@ const Reports = () => {
 
   /** 确认口径并写回项目：这是项目级决定，不该只活在当前页面里。 */
   const confirmWording = async (code: string, option: string) => {
-    const next = { ...issueAnswers, [code]: option };
+    const next = { ...issueAnswersRef.current, [code]: option };
+    issueAnswersRef.current = next;
     setIssueAnswers(next);
     if (!project?.id) return;
     const { error } = await (supabase as any)
@@ -1224,7 +1238,7 @@ const Reports = () => {
       const generationIndicatorInstruction = buildReportIndicatorInstruction(generationIndicators);
 
       // 使用者对口径冲突的选择要写进生成指令，否则模型只能自己挑一个版本。
-      const confirmedWordings = Object.entries(issueAnswers).filter(([, value]) => value);
+      const confirmedWordings = Object.entries(issueAnswersRef.current).filter(([, value]) => value);
       const confirmedWordingInstruction = confirmedWordings.length
         ? `【已人工确认的口径，必须严格遵守】\n${
           confirmedWordings.map(([, value], index) => `${index + 1}. ${value}`).join("\n")
@@ -1329,11 +1343,11 @@ const Reports = () => {
                   // 核验是流的第一个事件，此时还没发生任何 AI 调用，在这里拦住
                   // 不浪费任何生成开销。
                   const unanswered = (verification.issues ?? []).filter(
-                    (issue) => issue.options?.length && !issueAnswers[issue.code],
+                    (issue) => issue.options?.length && !issueAnswersRef.current[issue.code],
                   );
                   if (unanswered.length) {
                     setPendingWordingIssues(unanswered);
-                    setWordingDraft({ ...issueAnswers });
+                    setWordingDraft({ ...issueAnswersRef.current });
                     setWordingDialogOpen(true);
                     blockedByWording = true;
                     done = true;
@@ -1514,6 +1528,10 @@ const Reports = () => {
   ) => {
     if (!user || !project || !content) return;
     if (targetStatus === "finalized" && !conclusion) return toast.error("请先选择评估结论后再定稿");
+    // 拦在这里而不是按钮上：无论从哪个入口定稿都要过这一关。
+    if (targetStatus === "finalized" && finalizeBlockedReason) {
+      return toast.error(`${finalizeBlockedReason}，请先核实并修改后再定稿`);
+    }
     setSaving(true);
     const adoptedList = rects.filter((r) => adopted.has(rectKey(r)));
     const rectMd = adoptedList.length ? rectsToMarkdown(adoptedList) : null;
@@ -1817,7 +1835,10 @@ const Reports = () => {
                   )}
                   {reportVerification.issues.length > 0 && (
                     <div className="mt-2 space-y-2">
-                      {reportVerification.issues.slice(0, 6).map((issue) => (
+                      {reportVerification.issues
+                        .filter((issue) => !(issue.options?.length && issueAnswers[issue.code]))
+                        .slice(0, 6)
+                        .map((issue) => (
                         <div key={`${issue.code}:${issue.detail}`} className="leading-relaxed">
                           <p>
                             <span className="font-medium">{issue.title}：</span>{issue.detail}
@@ -1856,7 +1877,16 @@ const Reports = () => {
                           ) : null}
                         </div>
                       ))}
-                      {reportVerification.issues.some((issue) => issue.options?.length) && (
+                      {reportVerification.issues
+                        .filter((issue) => issue.options?.length && issueAnswers[issue.code])
+                        .map((issue) => (
+                          <p key={`done-${issue.code}`} className="text-[11px] text-success">
+                            ✓ 已确认口径：{issueAnswers[issue.code]}
+                          </p>
+                        ))}
+                      {reportVerification.issues.some(
+                        (issue) => issue.options?.length && !issueAnswers[issue.code],
+                      ) && (
                         <p className="text-[11px] text-muted-foreground">
                           选定口径后重新生成报告即可生效；未选择时模型不会自行统一版本，会按各份资料分别表述。
                         </p>
@@ -2102,7 +2132,7 @@ const Reports = () => {
                 </Button>
                 <Button
                   onClick={exportStandardReport}
-                  disabled={!content || !project || reportVerification?.status === "blocked"}
+                  disabled={!content || !project}
                   variant="hero"
                   size="sm"
                   title="导出标准评估报告（附件 10-1）"
