@@ -577,9 +577,15 @@ const ensureFinalChaptersComplete = (text: string, dimensions: string[]) => {
   if (!suggestions.includes("四、相关建议")) suggestions = `四、相关建议\n${suggestions}`.trim();
 
   suggestions = stripGenericSuggestionTail(`${suggestions}\n\n五、其他需要说明的问题`).replace(/\n\n五、其他需要说明的问题$/, "").trim();
-  const existingSuggestionCount =
-    (suggestions.match(/^\s*\d+[.．、]/gm) ?? []).length
-    + (suggestions.match(/^\s*（[一二三四五六七八九十]+）/gm) ?? []).length;
+  // 只认 "1." 和 "（一）" 两种写法会误判：模型常写成 "1、"、"**（一）**"、
+  // "一、" 或带序号的小标题，条数明明够却被判为不完整，整章因此失败，
+  // 连带前三章的成果一起丢掉。这里放宽格式识别，但"不足 4 条就拒绝"的
+  // 实质要求不变。
+  const suggestionBody = suggestions.replace(/^[\s\S]*?四、相关建议/, "");
+  const existingSuggestionCount = new Set(
+    (suggestionBody.match(/^\s*(?:[*_#\s]*)(?:\d+|[（(][一二三四五六七八九十\d]+[）)]|[一二三四五六七八九十]+[、.．])/gm) ?? [])
+      .map((item, index) => `${item.replace(/[\s*_#]/g, "")}-${index}`),
+  ).size;
   if (existingSuggestionCount < 4) {
     throw new Error("第四章建议不完整，已阻止默认建议兜底");
   }
