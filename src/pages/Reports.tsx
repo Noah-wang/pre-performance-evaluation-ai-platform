@@ -592,11 +592,6 @@ const Reports = () => {
     setReportVerification(null);
   }, [pid]);
 
-  // 口径确认是项目级决定：进入项目就带出已经定过的，不必每次重选。
-  useEffect(() => {
-    setIssueAnswers((project?.wording_decisions as Record<string, string>) ?? {});
-  }, [pid, project?.wording_decisions]);
-
   useEffect(() => {
     if (typeof window === "undefined") return;
     const payload: ReportsWorkspaceCache = {
@@ -659,6 +654,11 @@ const Reports = () => {
   }, [activeTab]);
 
   const project = projects.find((p) => p.id === pid);
+
+  // 口径确认是项目级决定：进入项目就带出已经定过的，不必每次重选。
+  useEffect(() => {
+    setIssueAnswers((project?.wording_decisions as Record<string, string>) ?? {});
+  }, [pid, project?.wording_decisions]);
 
   const annotateReportCitations = async (html: string, options?: { silent?: boolean; force?: boolean }) => {
     const normalized = options?.force
