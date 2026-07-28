@@ -32,3 +32,6 @@ verify_jwt = false
 
 [functions.search-knowledge]
 verify_jwt = false
+
+[functions.report-citations]
+verify_jwt = false
