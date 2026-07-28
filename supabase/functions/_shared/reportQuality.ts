@@ -299,6 +299,16 @@ export const cleanReportLanguage = (report: string) =>
     )
     .replace(/[；;]\s*[、，,]/g, "；")
     .replace(/([\u4e00-\u9fa5]{2,8})。\1。/g, "$1。")
+    // 句尾常拖出一个上文片段的复读，例如"调阅响应≤24 小时。24 小时。"。
+    // 上面那条只认纯中文，带数字、单位或空格的片段（24 小时、90.2 万元）漏网。
+    // 这里要求该片段确实在前文出现过才删，避免误伤正常的短句重复。
+    .replace(
+      /([^。；\n]{2,20})([。；])\s*([\d.]+\s*[\u4e00-\u9fa5%]{1,6})[。；]/g,
+      (full, head, mark, tail) =>
+        String(head).replace(/\s+/g, "").includes(String(tail).replace(/\s+/g, ""))
+          ? `${head}${mark}`
+          : full,
+    )
     .replace(/[；;]\s*[。．]/g, "。")
     .replace(/[。．]{2,}/g, "。")
     .replace(/[；;]{2,}/g, "；")

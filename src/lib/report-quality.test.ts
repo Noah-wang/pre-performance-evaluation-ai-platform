@@ -188,4 +188,18 @@ describe("report quality corrections", () => {
       + "LACKING an ok tr 档案 存储 及 管理 服务 项目 abc def ghi jkl mno pqr stu vwx yza bcd efg hij klm nop qrs";
     expect(containsCorruptedReportText(line)).toBe(true);
   });
+
+  it("删除句尾复读的数值片段", () => {
+    const result = applyReportQualityCorrections(
+      "（4）服务质量监管：确保档案完好率100%、调阅响应≤24 小时。24 小时。",
+      "",
+    );
+    expect(result).toContain("调阅响应≤24 小时。");
+    expect(result.match(/24\s*小时/g)?.length).toBe(1);
+  });
+
+  it("不误删前后不同的数值句", () => {
+    const text = "存储费58元/标箱/年。运输费5元/箱。";
+    expect(applyReportQualityCorrections(text, "")).toBe(text);
+  });
 });
