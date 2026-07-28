@@ -588,16 +588,26 @@ export const AudioRecorder = ({
         review_note: null,
       };
 
+      let materialId = existing?.id ?? null;
       if (existing?.id) {
         const { error } = await supabase.from("materials").update(materialPayload).eq("id", existing.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from("materials").insert({
+        const { data: inserted, error } = await supabase.from("materials").insert({
           project_id: projectId,
           created_by: user.id,
           ...materialPayload,
-        });
+        }).select("id").single();
         if (error) throw error;
+        materialId = inserted?.id ?? null;
+      }
+
+      if (materialId) {
+        void supabase.functions.invoke("ingest-project-knowledge", {
+          body: { materialId },
+        }).then(({ error }) => {
+          if (error) console.warn("transcript knowledge indexing failed", error);
+        });
       }
 
       await load();

@@ -2,6 +2,12 @@ import { createContext, useContext, useEffect, useState, ReactNode } from "react
 import { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 
+const ROLE_PRIORITY: Record<string, number> = {
+  admin: 1,
+  group_member: 2,
+  expert: 3,
+};
+
 interface AuthCtx {
   user: User | null;
   session: Session | null;
@@ -46,10 +52,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setLoading(true);
     setTimeout(async () => {
       const { data } = await supabase.from("user_roles").select("role").eq("user_id", user.id);
-      const loadedRoles = (data ?? []).map((r: any) => r.role);
+      const loadedRoles = (data ?? [])
+        .map((r: any) => r.role)
+        .filter(Boolean)
+        .sort((a: string, b: string) => (ROLE_PRIORITY[a] ?? 99) - (ROLE_PRIORITY[b] ?? 99));
+      const primaryRole = loadedRoles[0];
       // New accounts are business users by default; this also keeps legacy
       // accounts without a role from getting stuck with only the dashboard.
-      setRoles(loadedRoles.length > 0 ? loadedRoles : ["group_member"]);
+      setRoles(primaryRole ? [primaryRole] : ["group_member"]);
       setLoading(false);
     }, 0);
   }, [user]);

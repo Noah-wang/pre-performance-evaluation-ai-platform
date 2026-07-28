@@ -198,7 +198,7 @@ export const EvaluationPlanPanel = ({ project, group, members, tasks }: Props) =
       const injectedTags = [
         Number(resp.headers.get("X-Rag-Overview") || 0) > 0 && `资料全景×${resp.headers.get("X-Rag-Overview")}`,
         Number(resp.headers.get("X-Rag-Priority-Chunks") || 0) > 0 && `重点片段×${resp.headers.get("X-Rag-Priority-Chunks")}`,
-        Number(resp.headers.get("X-Rag-Knowledge") || 0) > 0 && `文件库×${resp.headers.get("X-Rag-Knowledge")}`,
+        Number(resp.headers.get("X-Rag-Knowledge") || 0) > 0 && `资料×${resp.headers.get("X-Rag-Knowledge")}`,
         Number(resp.headers.get("X-Rag-Materials") || 0) > 0 && `资料×${resp.headers.get("X-Rag-Materials")}`,
         Number(resp.headers.get("X-Rag-History") || 0) > 0 && `历史×${resp.headers.get("X-Rag-History")}`,
         Number(resp.headers.get("X-Rag-Goals") || 0) > 0 && `目标×${resp.headers.get("X-Rag-Goals")}`,

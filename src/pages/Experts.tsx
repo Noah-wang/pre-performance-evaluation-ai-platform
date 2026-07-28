@@ -801,7 +801,7 @@ const Experts = () => {
         .from("project-materials")
         .upload(path, blob, { contentType: "application/pdf", upsert: false });
       if (upErr) throw upErr;
-      const { error: insErr } = await supabase.from("materials").insert({
+      const { data: materialRecord, error: insErr } = await supabase.from("materials").insert({
         project_id: noticeProjectId,
         name: `专家评审组任命书 ${noticeMeta?.notice_no ?? ""}`,
         category: "公文",
@@ -810,8 +810,15 @@ const Experts = () => {
         file_path: path,
         file_name: filename,
         created_by: user.id,
-      } as any);
+      } as any).select("id").single();
       if (insErr) throw insErr;
+      if (materialRecord?.id) {
+        void supabase.functions.invoke("ingest-project-knowledge", {
+          body: { materialId: materialRecord.id },
+        }).then(({ error }) => {
+          if (error) console.warn("notice knowledge indexing failed", error);
+        });
+      }
       toast.success("任命书已入档至「资料」库");
     } catch (e: any) {
       toast.error("入档失败：" + (e?.message ?? ""));

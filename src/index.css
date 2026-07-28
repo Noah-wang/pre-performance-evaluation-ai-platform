@@ -195,6 +195,60 @@
     @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-mono font-medium;
   }
 
+  .report-citation {
+    position: relative;
+    display: inline;
+    border-radius: 0.25rem;
+    padding: 0 0.125rem;
+    background: hsl(var(--gold) / 0.22);
+    box-shadow: inset 0 -0.08em 0 hsl(var(--gold) / 0.72);
+    cursor: help;
+  }
+
+  .report-citation:hover {
+    background: hsl(var(--gold) / 0.34);
+    box-shadow: inset 0 -0.1em 0 hsl(var(--gold) / 0.95);
+  }
+
+  .report-citation:hover::after {
+    content: "出处：" attr(data-source) "\A原文：" attr(data-snippet);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 10px);
+    z-index: 60;
+    width: min(24rem, 80vw);
+    transform: translateX(-50%);
+    white-space: pre-wrap;
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.75rem;
+    background: hsl(var(--popover));
+    color: hsl(var(--popover-foreground));
+    padding: 0.75rem 0.875rem;
+    font-family: 'Noto Sans SC', system-ui, sans-serif;
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.65;
+    letter-spacing: 0;
+    text-align: left;
+    box-shadow: var(--shadow-lg);
+    pointer-events: none;
+  }
+
+  .report-citation:hover::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 4px);
+    z-index: 61;
+    width: 0.75rem;
+    height: 0.75rem;
+    transform: translateX(-50%) rotate(45deg);
+    border-right: 1px solid hsl(var(--border));
+    border-bottom: 1px solid hsl(var(--border));
+    background: hsl(var(--popover));
+    pointer-events: none;
+  }
+
   /* 状态指示点 */
   .status-dot {
     @apply inline-block w-1.5 h-1.5 rounded-full;

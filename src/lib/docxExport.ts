@@ -9,8 +9,13 @@ import {
 import { renderTemplate } from "./templates";
 import { richTextToPlainText } from "./richText";
 import { extractReportTocEntries } from "./reportToc";
+import { stripDeprecatedReportMethodSections } from "../../supabase/functions/_shared/reportTemplate";
 
-const FONT = "SimSun"; // 宋体
+// LibreOffice 转 PDF 时必须明确写入 eastAsia 字体，否则中文容易被替换成方框。
+// 服务器需安装 fonts-noto-cjk；Word 本身若本机没有该字体也会自动兜底显示。
+const FONT_NAME = "Noto Sans CJK SC";
+const FONT = { ascii: FONT_NAME, hAnsi: FONT_NAME, eastAsia: FONT_NAME, cs: FONT_NAME } as const;
+const HEADING_FONT = FONT;
 const cleanMarkdown = (value: string) =>
   String(value ?? "")
     .replace(/```[\w-]*\n?/g, "")
@@ -77,7 +82,7 @@ const H1 = (text: string) => new Paragraph({
   children: [
     new TextRun({
       text: cleanMarkdown(text),
-      font: "SimHei",
+      font: HEADING_FONT,
       bold: true,
       size: 36,
       color: "000000",
@@ -147,7 +152,7 @@ const coverLabelCell = (text: string) => new TableCell({
   children: [
     new Paragraph({
       alignment: AlignmentType.RIGHT,
-      children: [new TextRun({ text, font: "SimHei", bold: true, size: 26 })],
+      children: [new TextRun({ text, font: HEADING_FONT, bold: true, size: 26 })],
     }),
   ],
 });
@@ -159,7 +164,7 @@ const coverValueCell = (text: string) => new TableCell({
   children: [
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: cleanMarkdown(text), font: "SimHei", bold: true, size: 24 })],
+      children: [new TextRun({ text: cleanMarkdown(text), font: HEADING_FONT, bold: true, size: 24 })],
     }),
   ],
 });
@@ -172,12 +177,12 @@ const coverDateValueCell = (year: string, month: string, day: string) => new Tab
     new Paragraph({
       alignment: AlignmentType.CENTER,
       children: [
-        new TextRun({ text: year, font: "SimHei", bold: true, size: 24, underline: {} }),
-        new TextRun({ text: "  年  ", font: "SimHei", bold: true, size: 24 }),
-        new TextRun({ text: month, font: "SimHei", bold: true, size: 24, underline: {} }),
-        new TextRun({ text: "  月  ", font: "SimHei", bold: true, size: 24 }),
-        new TextRun({ text: day, font: "SimHei", bold: true, size: 24, underline: {} }),
-        new TextRun({ text: "  日", font: "SimHei", bold: true, size: 24 }),
+        new TextRun({ text: year, font: HEADING_FONT, bold: true, size: 24, underline: {} }),
+        new TextRun({ text: "  年  ", font: HEADING_FONT, bold: true, size: 24 }),
+        new TextRun({ text: month, font: HEADING_FONT, bold: true, size: 24, underline: {} }),
+        new TextRun({ text: "  月  ", font: HEADING_FONT, bold: true, size: 24 }),
+        new TextRun({ text: day, font: HEADING_FONT, bold: true, size: 24, underline: {} }),
+        new TextRun({ text: "  日", font: HEADING_FONT, bold: true, size: 24 }),
       ],
     }),
   ],
@@ -187,40 +192,134 @@ const coverRow = (label: string, value: string) => new TableRow({
   children: [coverLabelCell(`${label}：`), coverValueCell(value)],
 });
 
-const normalizeReportText = (value: string) =>
-  richTextToPlainText(String(value ?? ""))
-    .replace(/\r/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
+const stripAppendedReportSkeletonFromPlainText = (value: string) => {
+  const text = String(value ?? "").trim();
+  if (!text) return text;
+  const appendix = text.search(/六、附件[\s\S]*?(?:4[.．、]\s*专家组及工作组情况表|4\s*专家组及工作组情况表)/);
+  if (appendix < 0) return text;
+
+  const appendixText = text.slice(appendix);
+  const marker = appendixText.search(/\n\s*(?:一、评估对象|项目名称：\s*$|项目单位：\s*$|主管部门：\s*$|项目属性：\s*$)/m);
+  if (marker < 0) return text;
+
+  return `${text.slice(0, appendix)}${appendixText.slice(0, marker)}`.trim();
+};
+
+const stripDuplicateOpeningBeforeThirdChapter = (value: string) => {
+  const text = String(value ?? "").trim();
+  if (!text) return text;
+  const third = text.indexOf("三、评估内容与结论");
+  if (third < 0) return text;
+  const firstOpening = text.indexOf("一、评估对象");
+  if (firstOpening < 0 || firstOpening >= third) return text;
+  const secondOpening = text.indexOf("一、评估对象", firstOpening + "一、评估对象".length);
+  if (secondOpening < 0 || secondOpening >= third) return text;
+  return `${text.slice(0, secondOpening).trim()}\n\n${text.slice(third).trim()}`.trim();
+};
+
+const headingIndex = (text: string, heading: string) => {
+  const direct = text.indexOf(heading);
+  if (direct >= 0) return direct;
+  const loose = new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*"));
+  return loose.exec(text)?.index ?? -1;
+};
+
+const stripGenericSuggestionTail = (value: string) => {
+  const text = String(value ?? "").trim();
+  if (!text) return text;
+  const four = headingIndex(text, "四、相关建议");
+  const five = headingIndex(text, "五、其他需要说明的问题");
+  if (four < 0 || five < 0 || five <= four) return text;
+  const before = text.slice(0, four);
+  const suggestions = text.slice(four, five);
+  const after = text.slice(five);
+  const genericStart = suggestions.search(/\n\s*1[.．、]\s*针对(?:立项必要性|项目必要性|投入经济性|项目经济性|绩效目标合理性|实施方案可行性|项目可行性|筹资合规性|可持续性|项目效益性)/);
+  if (genericStart < 0) return text;
+  const formalPart = suggestions.slice(0, genericStart).trim();
+  const formalCount = (formalPart.match(/^\s*（[一二三四五六七八九十]+）/gm) ?? []).length;
+  if (formalCount < 2) return text;
+  return `${before}${formalPart}\n\n${after}`.trim();
+};
+
+const stripReportInternalTerms = (value: string) =>
+  String(value ?? "")
+    .replace(/五维论证逻辑/g, "六维论证逻辑")
+    .replace(/DA\/T\s*31-2017\s*与\s*DA\/T\s*31-2017/g, "DA/T 31-2017")
+    .replace(/现有生成内容未完整覆盖该部分[，,、]?\s*请结合\s*RAG\s*V2\s*项目证据档案补充完善。?/g, "")
+    .replace(/现有生成内容未完整覆盖该部分。?/g, "")
+    .replace(/请结合\s*(?:RAG\s*V2\s*)?项目证据档案补充完善。?/g, "")
+    .replace(/RAG\s*V2\s*项目证据档案|Grounded\s*RAG\s*证据账本|当前项目证据矩阵/g, "项目资料依据")
+    .replace(/资料库\/文件库|文件库|资料库/g, "项目资料")
+    .replace(/(?:现有|当前)?(?:正文|资料)?索引(?:未检出|未读取)?(?:，?需人工核对或重新索引)?/g, "根据现有资料暂未见明确依据")
+    .replace(/未建索引|索引文件|索引片段|切片|OCR|RAG/g, "资料")
+    .replace(/需人工核对或重新索引|重新索引/g, "需补充资料来源并复核")
+    .replace(/共查阅项目资料中的资料\s*(\d+)\s*份[，,]\s*资料\s*\d+\s*份[，,]\s*资料\s*\d+\s*份。?/g, "共查阅项目单位提供的相关资料$1份，重点核验项目申报、预算测算、绩效目标、实施方案及专家意见等材料。")
+    .replace(/共查阅项目资料中的资料\s*(\d+)\s*份。?/g, "共查阅项目单位提供的相关资料$1份。")
     .trim();
 
+const splitStuckSubheadings = (value: string) =>
+  String(value ?? "")
+    .replace(/(^|\n)(\s*[1-4][.．、]\s*(?:事实依据|发现的问题|分析判断|综上结论)[：:]?)(?=\S)/g, "$1$2\n")
+    .replace(/(^|\n)(\s*（\d+）\s*[^。\n]{2,24}指标)(?=\S)/g, "$1$2\n");
+
+const normalizeAppendixList = (value: string) => {
+  const text = String(value ?? "").trim();
+  const six = headingIndex(text, "六、附件");
+  if (six < 0) return text;
+
+  const before = text.slice(0, six).trim();
+  const appendix = [
+    "六、附件",
+    "（一）事前绩效评估项目预期绩效报告",
+    "（二）绩效目标申报表",
+    "（三）事前绩效评估专家评估意见书",
+    "（四）专家组及工作组情况表",
+  ].join("\n");
+  return `${before}\n\n${appendix}`.trim();
+};
+
+export const normalizeEvaluationReportTextForExport = (value: string) =>
+  normalizeAppendixList(stripDeprecatedReportMethodSections(splitStuckSubheadings(stripGenericSuggestionTail(stripReportInternalTerms(stripDuplicateOpeningBeforeThirdChapter(stripAppendedReportSkeletonFromPlainText(
+    richTextToPlainText(String(value ?? ""))
+      .replace(/\r/g, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  )))))));
+
+const isConciseHeadingText = (line: string, prefixPattern: RegExp) => {
+  const text = cleanMarkdown(String(line ?? "").trim());
+  const body = text.replace(prefixPattern, "").trim();
+  return body.length > 0 && body.length <= 28 && !/[。；;，,：:]/.test(body);
+};
+
 const reportParagraphsFromText = (value: string) => {
-  const lines = normalizeReportText(value).split("\n");
+  const lines = normalizeEvaluationReportTextForExport(value).split("\n");
   return lines.flatMap((raw) => {
     const line = raw.trim();
     if (!line) return [new Paragraph({ spacing: { after: 80 } })];
-    if (/^[一二三四五六七八九十]+、/.test(line)) {
+    if (/^[一二三四五六七八九十]+、/.test(line) && isConciseHeadingText(line, /^[一二三四五六七八九十]+、/)) {
       return [new Paragraph({
         heading: HeadingLevel.HEADING_1,
         spacing: { before: 240, after: 160 },
-        children: [new TextRun({ text: line, font: "SimHei", bold: true, size: 28 })],
+        children: [new TextRun({ text: line, font: HEADING_FONT, bold: true, size: 28 })],
       })];
     }
-    if (/^（[一二三四五六七八九十]+）/.test(line)) {
+    if (/^（[一二三四五六七八九十]+）/.test(line) && isConciseHeadingText(line, /^（[一二三四五六七八九十]+）/)) {
       return [new Paragraph({
         heading: HeadingLevel.HEADING_2,
         spacing: { before: 180, after: 120 },
         children: [new TextRun({ text: line, font: FONT, bold: true, size: 26 })],
       })];
     }
-    if (/^\d+\./.test(line)) {
+    if (/^\d+\./.test(line) && isConciseHeadingText(line, /^\d+\./)) {
       return [new Paragraph({
         heading: HeadingLevel.HEADING_3,
         spacing: { before: 120, after: 80 },
         children: [new TextRun({ text: line, font: FONT, bold: true, size: 24 })],
       })];
     }
-    if (/^（\d+）/.test(line)) {
+    if (/^（\d+）/.test(line) && isConciseHeadingText(line, /^（\d+）/)) {
       return [new Paragraph({
         heading: HeadingLevel.HEADING_4,
         spacing: { before: 80, after: 60 },
@@ -231,20 +330,29 @@ const reportParagraphsFromText = (value: string) => {
   });
 };
 
-const tocParagraph = (text: string, level: 1 | 2) => new Paragraph({
-  spacing: { after: 140 },
+const tocParagraphWithPage = (text: string, level: 1 | 2, page: number) => new Paragraph({
+  spacing: { after: 120 },
   indent: level === 2 ? { left: 420 } : undefined,
   tabStops: [{ type: TabStopType.RIGHT, position: TabStopPosition.MAX, leader: LeaderType.DOT }],
   children: [
     new TextRun({
       text,
-      font: level === 1 ? "SimHei" : FONT,
+      font: level === 1 ? HEADING_FONT : FONT,
       bold: level === 1,
       size: level === 1 ? 26 : 24,
     }),
     new TextRun({ text: "\t", font: FONT, size: 24 }),
+    new TextRun({ text: String(page), font: FONT, size: 24 }),
   ],
 });
+
+const estimateReportTocPages = (entries: ReturnType<typeof extractReportTocEntries>) => {
+  let currentPage = 3; // 封面、目录后正文从第 3 页开始
+  return entries.map((entry, index) => {
+    if (entry.level === 1 && index > 0) currentPage += 1;
+    return { ...entry, page: currentPage };
+  });
+};
 
 // =========== 1. 专家意见书（附件 8-1 / 8-2） ===========
 export interface ExpertOpinionData {
@@ -519,8 +627,10 @@ export const createEvaluationReportBlob = async (d: ReportData) => {
     { label: "评估机构", value: d.evaluator?.trim() },
     { label: "第三方机构", value: d.thirdPartyOrg?.trim() },
   ].filter((row) => row.value);
-  const bodyParagraphs = reportParagraphsFromText(d.reportContent);
-  const tocEntries = extractReportTocEntries(d.reportContent);
+  const normalizedReportContent = normalizeEvaluationReportTextForExport(d.reportContent);
+  const bodyParagraphs = reportParagraphsFromText(normalizedReportContent);
+  const tocEntries = extractReportTocEntries(normalizedReportContent);
+  const estimatedTocEntries = estimateReportTocPages(tocEntries);
 
   const doc = new Document({
     styles: { default: { document: { run: { font: FONT, size: 24 } } } },
@@ -532,7 +642,7 @@ export const createEvaluationReportBlob = async (d: ReportData) => {
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { before: 1800, after: 180 },
-          children: [new TextRun({ text: coverTitle, font: "SimHei", bold: true, size: 36 })],
+          children: [new TextRun({ text: coverTitle, font: HEADING_FONT, bold: true, size: 36 })],
         }),
         new Paragraph({ spacing: { after: 3000 } }),
         new Table({
@@ -553,10 +663,10 @@ export const createEvaluationReportBlob = async (d: ReportData) => {
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { before: 120, after: 260 },
-          children: [new TextRun({ text: "目 录", font: "SimHei", bold: true, size: 32 })],
+          children: [new TextRun({ text: "目 录", font: HEADING_FONT, bold: true, size: 32 })],
         }),
-        ...(tocEntries.length
-          ? tocEntries.map((item) => tocParagraph(item.text, item.level))
+        ...(estimatedTocEntries.length
+          ? estimatedTocEntries.map((item) => tocParagraphWithPage(item.text, item.level, item.page))
           : [new Paragraph({
               alignment: AlignmentType.CENTER,
               spacing: { after: 160 },

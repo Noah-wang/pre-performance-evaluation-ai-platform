@@ -11,20 +11,25 @@ const normalizeHeadingText = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+const isShortSectionHeading = (text: string) => {
+  const body = text.replace(/^[一二三四五六七八九十]+、/, "").replace(/^（[一二三四五六七八九十]+）/, "").trim();
+  return body.length > 0 && body.length <= 28 && !/[。；;，,：:]/.test(body);
+};
+
 const parseHeading = (raw: string, hintedLevel?: 1 | 2): ReportTocEntry | null => {
   const text = normalizeHeadingText(raw);
   if (!text) return null;
 
-  if (hintedLevel === 1 && /^[一二三四五六七八九十]+、/.test(text)) {
+  if (hintedLevel === 1 && /^[一二三四五六七八九十]+、/.test(text) && isShortSectionHeading(text)) {
     return { text, level: 1 };
   }
-  if (hintedLevel === 2 && /^（[一二三四五六七八九十]+）/.test(text)) {
+  if (hintedLevel === 2 && /^（[一二三四五六七八九十]+）/.test(text) && isShortSectionHeading(text)) {
     return { text, level: 2 };
   }
-  if (/^[一二三四五六七八九十]+、/.test(text)) {
+  if (/^[一二三四五六七八九十]+、/.test(text) && isShortSectionHeading(text)) {
     return { text, level: 1 };
   }
-  if (/^（[一二三四五六七八九十]+）/.test(text)) {
+  if (/^（[一二三四五六七八九十]+）/.test(text) && isShortSectionHeading(text)) {
     return { text, level: 2 };
   }
   return null;

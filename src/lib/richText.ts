@@ -166,7 +166,8 @@ export const textToEditableHtml = (value: string) => {
 export const sanitizeRichText = (value: string) =>
   DOMPurify.sanitize(value, {
     USE_PROFILES: { html: true },
-    ADD_ATTR: ["style", "colspan", "rowspan"],
+    ADD_ATTR: ["style", "class", "title", "colspan", "rowspan", "data-report-citation", "data-source", "data-snippet"],
+    ALLOW_DATA_ATTR: true,
   });
 
 export const richTextToPlainText = (value: string) => {
