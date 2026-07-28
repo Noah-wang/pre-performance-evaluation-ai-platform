@@ -3,7 +3,7 @@ set -euo pipefail
 
 AI_URL="${AI_CHAT_BASE_URL:-}"
 ASR_URL="${LOCAL_ASR_BASE_URL:-}"
-OCR_URL="${LOCAL_OCR_BASE_URL:-}"
+OCR_URL="${DOCUMENT_EXTRACTOR_BASE_URL:-${LOCAL_OCR_BASE_URL:-}}"
 
 probe() {
   local name="$1"
@@ -27,6 +27,6 @@ probe() {
 
 probe "AI_CHAT_BASE_URL" "${AI_URL}"
 probe "LOCAL_ASR_BASE_URL" "${ASR_URL}"
-probe "LOCAL_OCR_BASE_URL" "${OCR_URL}"
+probe "DOCUMENT_EXTRACTOR_BASE_URL/LOCAL_OCR_BASE_URL" "${OCR_URL}"
 
 echo "AI / ASR / OCR 探测完成。"

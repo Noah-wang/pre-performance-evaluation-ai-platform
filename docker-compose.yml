@@ -1,4 +1,33 @@
 services:
+  document-parser:
+    container_name: performance-document-parser
+    profiles:
+      - ocr
+    build:
+      context: ./services/document-parser
+    image: performance-document-parser:latest
+    restart: unless-stopped
+    ports:
+      - "8091:8000"
+    environment:
+      OCR_LANG: ${OCR_LANG:-chi_sim+eng}
+      OCR_MAX_PAGES: ${OCR_MAX_PAGES:-120}
+      OCR_MIN_CHARS: ${OCR_MIN_CHARS:-80}
+      OCR_DPI: ${OCR_DPI:-220}
+      OCR_MAX_CONCURRENT: ${OCR_MAX_CONCURRENT:-1}
+      VISION_OCR_API_KEY: ${VISION_OCR_API_KEY:-}
+      VISION_OCR_BASE_URL: ${VISION_OCR_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions}
+      VISION_OCR_MODEL: ${VISION_OCR_MODEL:-qwen-vl-ocr-latest}
+      VISION_OCR_TIMEOUT_SECONDS: ${VISION_OCR_TIMEOUT_SECONDS:-50}
+      VISION_OCR_MIN_CONFIDENCE: ${VISION_OCR_MIN_CONFIDENCE:-55}
+      EXTRACT_TEXT_MAX_CHARS: ${EXTRACT_TEXT_MAX_CHARS:-120000}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()\""]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 30s
+
   performance-web:
     container_name: performance-web
     build:
@@ -17,4 +46,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-

@@ -1,0 +1,15 @@
+services:
+  document-parser:
+    environment:
+      OCR_DPI: ${OCR_DPI:-220}
+      OCR_MAX_CONCURRENT: ${OCR_MAX_CONCURRENT:-1}
+      # 视觉 OCR 可以走与对话模型不同的服务商，所以用独立变量，缺省才回落到 AI_API_KEY。
+      VISION_OCR_API_KEY: ${VISION_OCR_API_KEY:-${AI_API_KEY:-}}
+      VISION_OCR_BASE_URL: ${VISION_OCR_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions}
+      VISION_OCR_MODEL: ${VISION_OCR_MODEL:-qwen-vl-ocr-latest}
+      VISION_OCR_TIMEOUT_SECONDS: ${VISION_OCR_TIMEOUT_SECONDS:-50}
+      VISION_OCR_MIN_CONFIDENCE: ${VISION_OCR_MIN_CONFIDENCE:-55}
+      VISION_OCR_MODE: ${VISION_OCR_MODE:-prefer}
+      VISION_OCR_MAX_PAGES: ${VISION_OCR_MAX_PAGES:-40}
+      # 不同视觉模型的 max_tokens 上限差别很大（glm-4v-plus 只允许 2048），超限会直接 400。
+      VISION_OCR_MAX_TOKENS: ${VISION_OCR_MAX_TOKENS:-2048}

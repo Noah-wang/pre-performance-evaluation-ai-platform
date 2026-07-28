@@ -31,3 +31,8 @@ supabase/.temp/
 *.njsproj
 *.sln
 *.sw?
+
+# 本地运行产物
+output/
+tmp/
+services/document-parser/__pycache__/

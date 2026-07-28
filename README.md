@@ -12,6 +12,7 @@
 - **会议录音与转写**：先录音生成音频文件，再调用转写服务生成文字稿，便于后续形成会议纪要、预评估意见和正式评估依据。
 - **AI 辅助报告**：基于项目资料、会议内容、指标体系和专家意见生成评估报告、整改建议、专家组意见等文档，并支持在线编辑和 Word 导出。
 - **RAG 文件库**：把项目资料和系统生成文档纳入知识库，按项目检索引用，辅助问答、写稿和资料核验。
+- **文档解析与 OCR**：服务端解析可复制 PDF、扫描 PDF、图片和旧版 Word，把正文写入文件库索引，减少报告生成时“看不到资料”的情况。
 - **权限与可见范围**：管理员可查看全部内容；工作组成员、专家仅查看与自己相关的项目数据。
 
 ## 技术栈
@@ -34,6 +35,7 @@
 ├── docs/                   # 部署、使用、安全、交付说明
 ├── public/                 # 静态资源
 ├── scripts/ops/            # 备份、恢复、部署检查脚本
+├── services/document-parser # PDF/图片/旧版 Office 文档解析与 OCR 服务
 ├── Dockerfile
 ├── docker-compose.yml
 └── README.md
@@ -87,6 +89,8 @@ npm run build
 - `AI_API_KEY_EMBEDDING` 或 `DASHSCOPE_API_KEY`
 - `AI_TRANSCRIPTION_API_KEY`
 - `AI_TRANSCRIPTION_BASE_URL`
+- `DOCUMENT_EXTRACTOR_BASE_URL`
+- `EXTRACT_TEXT_MAX_CHARS`
 - `AMAP_JSCODE`
 - `TENCENT_SMS_SECRET_ID`
 - `TENCENT_SMS_SECRET_KEY`
@@ -109,6 +113,31 @@ npm run build
 
 ```bash
 docker compose up -d --build
+```
+
+如果需要让 RAG/报告生成读取扫描 PDF、图片、签章件和旧版 `.doc`，需要同时启动文档解析服务：
+
+```bash
+docker compose up -d --build document-parser
+```
+
+然后在 Supabase Edge Function Secrets 中配置：
+
+```bash
+ENABLE_DOCUMENT_EXTRACTOR="true"
+DOCUMENT_EXTRACTOR_BASE_URL="http://127.0.0.1:8091"
+EXTRACT_TEXT_MAX_CHARS="120000"
+SHEET_EXTRACT_MAX_ROWS="2000"
+```
+
+`ENABLE_DOCUMENT_EXTRACTOR` 必须显式设为 `"true"`，否则 PDF、图片和旧版 `.doc` 不会被送去解析，只能得到文件信息级索引。
+
+若 Edge Function 与文档解析服务处于同一个 Docker 网络，也可以把地址配置为服务名，例如 `http://document-parser:8000`；`127.0.0.1` 在 Edge Function 容器内指向容器自身，通常访问不到宿主机上的解析服务。配置后，在“文件库”或“资料收集审核”重新处理索引，PDF/图片会从“仅文件信息”变成“全文已索引”。
+
+排查单份资料为什么被报告核验判为“未完成解析”：
+
+```bash
+SUPABASE_URL="https://supabase.example.com" SUPABASE_SERVICE_ROLE_KEY="..." DIAGNOSE_PROJECT_ID="<项目 UUID>" node scripts/ops/diagnose-material-index.mjs
 ```
 
 常用运维脚本：
