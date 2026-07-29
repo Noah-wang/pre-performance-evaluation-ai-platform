@@ -312,7 +312,7 @@ const removeEchoedTails = (value: string) =>
     })
     .join("\n");
 
-const cleanReportLanguage = (report: string) =>
+export const cleanReportLanguage = (report: string) =>
   String(report ?? "")
     .replace(/(标箱|非标箱|万元|元|次|项|件|份|人|户)\1/g, "$1")
     .replace(/([^。\n]{8,160}[。])\s*\1/g, "$1")
