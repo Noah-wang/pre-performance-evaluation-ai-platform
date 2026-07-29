@@ -1763,7 +1763,7 @@ const Reports = () => {
     } as any);
     setArchiving(false);
     if (error) toast.error(error.message);
-    else toast.success("已归入项目库");
+    else toast.success("已存入项目库，可在「结果应用与项目库」查看");
   };
 
   return (
@@ -1772,7 +1772,7 @@ const Reports = () => {
         <PageHeader
           eyebrow="PHASE III · 07 · AI 报告"
           title="评估报告 · AI 撰写"
-          subtitle="AI 自动撰写报告 · 生成整改建议 · 统一导出标准报告并归档"
+          subtitle="AI 自动撰写报告 · 生成整改建议 · 统一导出标准报告并存入项目库"
           className="mb-0"
         />
 
@@ -2183,7 +2183,7 @@ const Reports = () => {
                   <Save className="h-4 w-4" /> 保存草稿
                 </Button>
                 <Button onClick={archive} disabled={!currentReportId || archiving} variant="outline" size="sm" className="w-full justify-center">
-                  <ArchiveIcon className="h-4 w-4" /> 归档
+                  <ArchiveIcon className="h-4 w-4" /> 存入项目库
                 </Button>
                 <Button onClick={() => setShareOpen(true)} disabled={!currentReportId} variant="outline" size="sm" className="w-full justify-center">
                   <Share2 className="h-4 w-4" /> 安全外发

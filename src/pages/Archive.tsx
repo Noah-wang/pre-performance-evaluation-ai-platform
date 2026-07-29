@@ -173,7 +173,7 @@ const Archive = () => {
       <PageHeader
         eyebrow="PHASE III · 08 · 项目库"
         title="结果应用与项目库"
-        subtitle="评估完成项目自动入库 · 支持检索 / 筛选 / 追溯报告与整改建议"
+        subtitle="在报告页点「存入项目库」后归集 · 支持检索 / 筛选 / 追溯报告与整改建议"
       />
 
       {/* 统计 */}
