@@ -312,7 +312,10 @@ export const verifyFinalReport = (
   ].filter(Boolean).join("\n")));
   const unsupportedSignals = businessSignals(text)
     .filter((signal) => !evidenceSignals.has(signal))
-    .filter((signal) => !/^(?:1|2|3|4|5|6|7|8|9|10)(?:年|月|天|次|项)$/.test(signal));
+    .filter((signal) => !/^(?:1|2|3|4|5|6|7|8|9|10)(?:年|月|天|次|项)$/.test(signal))
+    // 零值是"没有/无"的如实表述：申报表里"其他资金"一栏为空，报告写成
+    // "其他资金0万元"是准确的，但语料里不会有"0万元"这个字面，会被误判成编造。
+    .filter((signal) => !/^(?:≥|≤|>|<|=)?0(?:\.0+)?[^\d]/.test(signal));
   if (unsupportedSignals.length) {
     issues.push({
       code: "UNSUPPORTED_NUMERIC_CLAIMS",
