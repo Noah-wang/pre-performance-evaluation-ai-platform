@@ -133,10 +133,20 @@ const PackageDetail = () => {
     const vals = projects.map(p => scoresMap[p.id]).filter(Boolean);
     return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
   }, [projects, scoresMap]);
+  // 一个项目往往有多份报告，最新那份常常是还没填结论的草稿。若直接取最新，
+  // 表格就会显示"未出结论"，而实际上评估结论早已确定。结论以"最近一份填了
+  // 结论的报告"为准；没有任何一份填过才算未出结论。
   const latestReportMap = useMemo(() => {
     const map = new Map<string, Report>();
     reports.forEach((report) => {
-      if (!map.has(report.project_id)) map.set(report.project_id, report);
+      const current = map.get(report.project_id);
+      if (!current) {
+        map.set(report.project_id, report);
+        return;
+      }
+      if (!current.conclusion?.trim() && report.conclusion?.trim()) {
+        map.set(report.project_id, report);
+      }
     });
     return map;
   }, [reports]);
