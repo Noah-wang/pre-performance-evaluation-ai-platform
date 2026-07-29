@@ -325,7 +325,13 @@ const ExpertScoring = () => {
     });
   }, [topIndicators, scoreRows, expertNames, indicators]);
 
-  const totalAvg = useMemo(() => summary.reduce((a, b) => a + b.avg, 0), [summary]);
+  // 表格里每项平均分都按两位小数展示（8.666… 显示成 8.67）。合计若用原始值累加，
+  // 就会出现"逐项相加 55.01、合计写 55.00"的对不上账。以显示值为准累加，
+  // 保证表格自身可核对。
+  const totalAvg = useMemo(
+    () => summary.reduce((sum, row) => sum + Math.round(row.avg * 100) / 100, 0),
+    [summary],
+  );
   const scoredStats = useMemo(() => {
     const totals = new Map<string, number>();
     expertNames.forEach((name) => {
@@ -385,7 +391,10 @@ const ExpertScoring = () => {
         const ratio = max > 0 ? row.avg / max : 0;
         return { ...row, ratio, gap: max - row.avg };
       })
-      .filter((row) => row.maxScore > 0 && row.gap > 0.01 && row.ratio < 0.999)
+      // 得分率同样按整数百分比展示：99.6% 会显示成"100%"，却因为 0.996 < 0.999
+      // 仍被算作低分维度，出现"得分率 100% 的项列在低分维度里"。阈值与展示口径
+      // 对齐——显示为 100% 的一律不算低分。
+      .filter((row) => row.maxScore > 0 && row.gap > 0.01 && Math.round(row.ratio * 100) < 100)
       .sort((a, b) => a.ratio - b.ratio || b.gap - a.gap)
       .slice(0, 3);
   }, [summary]);
