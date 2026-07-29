@@ -66,6 +66,8 @@ export interface ReportVerificationDossier {
   targetFacts?: AuthoritativeTargetFact[];
   sourceNames?: string[];
   corpus?: string;
+  /** 评估机构在界面上填写的结论金额等口径：它们是人的决定，不应要求在资料中找到出处。 */
+  decisionFigures?: string[];
   serviceProviders?: Array<{ name?: string | null }>;
 }
 
@@ -299,8 +301,11 @@ export const verifyFinalReport = (
     });
   }
 
+  // 支持金额、不予支持金额这类数字来自评估机构的判断，本就不存在于项目资料中。
+  // 不纳入可信来源就会被判成"查无出处"，把人自己填的结论拦下来。
   const evidenceSignals = new Set(businessSignals([
     dossier.corpus,
+    ...(dossier.decisionFigures ?? []),
     ...(dossier.targetFacts ?? []).map((fact) =>
       `${fact.name}${fact.comparison}${fact.value}${fact.unit}`
     ),

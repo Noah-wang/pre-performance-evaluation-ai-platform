@@ -1521,7 +1521,14 @@ Deno.serve(async (req) => {
           confirmedDraft = `${confirmedDraft}${completedSection.trim()}\n\n`;
           controller.enqueue(encoder.encode(sseReplace(confirmedDraft)));
         }
-        const finalVerification = verifyFinalReport(confirmedDraft, ragDossier as any);
+        // 结论汇总口径里的金额由评估机构填写，随 extra 传入，资料中不会有出处。
+        const decisionFigures = Array.from(
+          String(extra ?? "").matchAll(/[\d.]+\s*万元/g),
+        ).map((match) => String(match[0]));
+        const finalVerification = verifyFinalReport(
+          confirmedDraft,
+          { ...(ragDossier as any), decisionFigures },
+        );
         controller.enqueue(encoder.encode(sseVerification(finalVerification)));
         // 终稿核验发现问题时不能丢弃正文：内容本身是有价值的，需要人来核对和
         // 修改。真正该拦住的是"定稿"，前端据 verification.status 决定。
