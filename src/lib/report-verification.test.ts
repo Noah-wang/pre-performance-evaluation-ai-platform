@@ -79,7 +79,7 @@ describe("comprehensive report verification", () => {
     expect(result.issues.some((issue) => issue.code === "MISSING_AUTHORITATIVE_TARGETS")).toBe(true);
   });
 
-  it("blocks finalizing when a number cannot be traced back to the materials", () => {
+  it("flags an untraceable number for review without blocking", () => {
     const report = `一、评估对象
 项目预算90.2万元。
 二、评估方式和方法
@@ -89,13 +89,13 @@ describe("comprehensive report verification", () => {
 四、相关建议`;
     const result = verifyFinalReport(report, dossier);
 
-    // 查无出处的数字会被当成事实读，只提示不拦截等于放行。这里阻断的是定稿，
-    // 正文照常生成，人核实修改后即可定稿。
-    expect(result.status).toBe("blocked");
+    // 这条回查误报率偏高（零值、评估机构自填金额、由资料推算的数字都会命中），
+    // 因此只提示不阻断，判断权留给使用者。
+    expect(result.status).toBe("needs_review");
     expect(result.issues.some((issue) => issue.code === "UNSUPPORTED_NUMERIC_CLAIMS")).toBe(true);
   });
 
-  it("blocks finalizing when the report cites a source that does not exist", () => {
+  it("flags a citation that does not exist in the materials", () => {
     const report = `一、评估对象
 项目预算90.2万元。
 二、评估方式和方法
@@ -105,8 +105,10 @@ describe("comprehensive report verification", () => {
 四、相关建议`;
     const result = verifyFinalReport(report, dossier);
 
-    expect(result.status).toBe("blocked");
+    // 该 dossier 带有权威绩效目标，正文未写全会另行触发 error，这里只关心引用回查
+    // 本身是提示级别、且指出了具体名称。
     const issue = result.issues.find((item) => item.code === "UNSUPPORTED_CITATIONS");
+    expect(issue?.severity).toBe("warning");
     expect(issue?.detail).toContain("中央财政档案事务补助资金管理办法");
   });
 

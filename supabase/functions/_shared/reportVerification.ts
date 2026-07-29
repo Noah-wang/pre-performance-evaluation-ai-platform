@@ -319,9 +319,12 @@ export const verifyFinalReport = (
   if (unsupportedSignals.length) {
     issues.push({
       code: "UNSUPPORTED_NUMERIC_CLAIMS",
-      severity: "error",
+      // 提示而非阻断：这条回查的误报率偏高——零值、评估机构自填的结论金额、
+      // 由资料内容推算出的数字都会命中，实际编造只占少数。拦住定稿会打断正常
+      // 工作，判断权交回给使用者。
+      severity: "warning",
       title: "报告存在无法回溯到资料的数字或标准号",
-      detail: `${unsupportedSignals.slice(0, 12).join("、")}。这些数字在项目资料中查不到出处，定稿前必须核实或删除。`,
+      detail: `${unsupportedSignals.slice(0, 12).join("、")}。请在定稿前核对其来源；系统不会把这些数字静默判定为可靠事实。`,
     });
   }
 
@@ -329,9 +332,11 @@ export const verifyFinalReport = (
   if (fabricatedCitations.length) {
     issues.push({
       code: "UNSUPPORTED_CITATIONS",
-      severity: "error",
+      // 同数字回查：提示而非阻断。判定难免有边界情况（真实文件名、资料正文里
+      // 提到过的政策），拦住定稿的代价大于收益。
+      severity: "warning",
       title: "报告引用了资料中不存在的依据",
-      detail: `${fabricatedCitations.slice(0, 8).join("、")}。这些名称在已上传资料和正文中均未出现，属于模型自行引用的外部依据，定稿前必须核实或删除。`,
+      detail: `${fabricatedCitations.slice(0, 8).join("、")}。这些名称在已上传资料和正文中均未出现，请在定稿前核实其来源。`,
       sourceNames: fabricatedCitations.slice(0, 8),
     });
   }
