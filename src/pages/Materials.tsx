@@ -838,8 +838,16 @@ const Materials = () => {
           console.warn("material knowledge indexing failed", indexError);
         });
       }
-      await loadMaterials();
+      // 上传完立即把这条资料更新到本地列表，文件马上出现在界面上。
+      // loadMaterials 要串两个请求再合并，等它回来才刷新，用户会觉得"点了半天没反应"；
+      // 批量上传时更是每传一个就整表重拉一次。这里放到后台对齐即可。
+      setMaterials((prev) => prev.map((item) =>
+        item.id === m.id
+          ? { ...item, file_path: path, file_name: file.name, status: "received", review_note: null }
+          : item
+      ));
       if (!options.silent) toast.success("上传成功");
+      if (!options.deferIndex) void loadMaterials();
       return true;
     } catch (e: any) {
       if (!options.silent) toast.error(e?.message ?? "上传失败");
@@ -1060,6 +1068,11 @@ const Materials = () => {
     }).select("*").single();
     if (insertError || !inserted) throw insertError ?? new Error("创建追加资料记录失败");
     const newMaterial = inserted as Material;
+    // 先把新建的资料行放进本地列表，onFile 完成后才能就地更新它并立刻显示；
+    // 否则要等整表重拉才看得到。
+    setMaterials((prev) => prev.some((item) => item.id === newMaterial.id)
+      ? prev
+      : [...prev, newMaterial]);
     const relatedIndicators = indicatorsOf(base);
     if (relatedIndicators.length) {
       const { error: linkError } = await supabase.from("material_indicators").insert(
@@ -1230,15 +1243,11 @@ const Materials = () => {
           failed += 1;
         }
       }
-      try {
-        const indexResult = await indexProjectForRag(projectId);
-        if (Number(indexResult?.failed ?? 0) > 0) {
-          toast.warning(`已完成上传和基础索引，${indexResult?.failed} 个文件正文未完全提取`, { duration: 5000 });
-        }
-      } catch (indexError) {
+      // 解析已改为后台异步任务，这里只负责发起，不等它返回——等待没有意义，
+      // 却会让"上传完成"的提示迟迟不出现。进度在「文件库」里可见。
+      void indexProjectForRag(projectId).catch((indexError) => {
         console.warn("bulk project knowledge indexing failed", indexError);
-        toast.warning("文件已上传，项目索引将在后台或下次报告生成时自动补建");
-      }
+      });
       await loadMaterials();
       toast.success(`文件夹上传完成：成功 ${success} 个，自动匹配 ${matched} 个${failed ? `，失败 ${failed} 个` : ""}`, { id: toastId });
     } catch (e: any) {

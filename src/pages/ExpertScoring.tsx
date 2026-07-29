@@ -385,6 +385,7 @@ const ExpertScoring = () => {
         const ratio = max > 0 ? row.avg / max : 0;
         return { ...row, ratio, gap: max - row.avg };
       })
+      .filter((row) => row.maxScore > 0 && row.gap > 0.01 && row.ratio < 0.999)
       .sort((a, b) => a.ratio - b.ratio || b.gap - a.gap)
       .slice(0, 3);
   }, [summary]);
@@ -670,7 +671,7 @@ const ExpertScoring = () => {
                   <Button size="sm" variant="hero" onClick={openScoring}><Plus className="h-3.5 w-3.5" />录入专家打分</Button>
                 }
               />
-              {expertNames.length > 0 && (
+              {topIndicators.length > 0 && (
                 <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
                   <div className="rounded-lg border border-warning/35 bg-warning/10 p-4">
                     <div className="flex items-center justify-between gap-2 mb-3">
@@ -681,7 +682,11 @@ const ExpertScoring = () => {
                       <StatusPill tone="warning" dot={false}>{weakestIndicators.length}</StatusPill>
                     </div>
                     <div className="space-y-2">
-                      {weakestIndicators.map((item) => (
+                      {!expertNames.length ? (
+                        <div className="rounded-md border border-dashed border-border bg-card/70 p-3 text-sm text-muted-foreground">
+                          暂无专家打分，录入或上传打分表后将自动定位低分维度。
+                        </div>
+                      ) : weakestIndicators.length ? weakestIndicators.map((item) => (
                         <div key={item.indicator.id} className="rounded-md border border-border bg-card/70 p-3 text-sm">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-mono text-xs text-accent">{item.indicator.code ?? "—"}</span>
@@ -693,7 +698,11 @@ const ExpertScoring = () => {
                             <div className="h-full bg-warning" style={{ width: `${Math.max(0, Math.min(100, item.ratio * 100))}%` }} />
                           </div>
                         </div>
-                      ))}
+                      )) : (
+                        <div className="rounded-md border border-border bg-card/70 p-3 text-sm text-muted-foreground">
+                          当前已录入指标均为满分，暂无低分维度。
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-4">
@@ -704,7 +713,11 @@ const ExpertScoring = () => {
                       </div>
                       <StatusPill tone="danger" dot={false}>{deductReasonSummary.length}</StatusPill>
                     </div>
-                    {deductReasonSummary.length ? (
+                    {!expertNames.length ? (
+                      <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
+                        暂无专家打分。录入或上传打分表后，系统会根据扣分理由自动归纳争议点。
+                      </div>
+                    ) : deductReasonSummary.length ? (
                       <div className="space-y-2">
                         {deductReasonSummary.map((item, index) => (
                           <div key={`${item.text}-${index}`} className="rounded-md border border-border bg-card/70 p-3 text-sm">
