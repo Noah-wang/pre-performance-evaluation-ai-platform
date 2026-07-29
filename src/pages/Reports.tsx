@@ -1571,6 +1571,31 @@ const Reports = () => {
     }
   };
 
+  /**
+   * 存入项目库。同一项目只保留一条记录：重新定稿会更新它，而不是堆出多条。
+   * reportId 显式传入，因为定稿后自动调用时 currentReportId 可能还没更新。
+   */
+  const archiveToLibrary = async (reportId: string, options?: { silent?: boolean }) => {
+    if (!user || !project || !reportId || !conclusion) return false;
+    const { error } = await (supabase as any)
+      .from("archived_projects")
+      .upsert({
+        project_id: project.id,
+        report_id: reportId,
+        project_snapshot: project as any,
+        conclusion,
+        archived_by: user.id,
+        archived_at: new Date().toISOString(),
+        archive_note: `经评估结论：${conclusion}`,
+      }, { onConflict: "project_id" });
+    if (error) {
+      if (!options?.silent) toast.error(error.message);
+      else console.warn("auto archive failed", error);
+      return false;
+    }
+    return true;
+  };
+
   const save = async (
     targetStatus: "draft" | "finalized" = "draft",
     options?: {
@@ -1641,6 +1666,13 @@ const Reports = () => {
       setProofing(true);
     } else if (targetStatus === "finalized") {
       clearProofingState();
+    }
+
+    // 定稿即代表评估完成，自动存入项目库；再次定稿会更新同一条记录，
+    // 不需要额外记得点按钮，也不会堆出多条历史。
+    if (targetStatus === "finalized" && data?.id) {
+      const archived = await archiveToLibrary(String(data.id), { silent: true });
+      if (archived) toast.success("已同步到项目库");
     }
     toast.success(
       `${options?.successMessage ?? (targetStatus === "finalized" ? "报告已定稿并锁定" : "报告草稿已保存")}${adoptedList.length ? ` · 已记录 ${adoptedList.length} 条整改` : ""}`,
@@ -1753,17 +1785,9 @@ const Reports = () => {
     if (!user || !project || !currentReportId) return toast.error("请先保存报告");
     if (!conclusion) return toast.error("请先选择评估结论");
     setArchiving(true);
-    const { error } = await supabase.from("archived_projects").insert({
-      project_id: project.id,
-      report_id: currentReportId,
-      project_snapshot: project as any,
-      conclusion,
-      archived_by: user.id,
-      archive_note: `经评估结论：${conclusion}`,
-    } as any);
+    const ok = await archiveToLibrary(currentReportId);
     setArchiving(false);
-    if (error) toast.error(error.message);
-    else toast.success("已存入项目库，可在「结果应用与项目库」查看");
+    if (ok) toast.success("已存入项目库，可在「结果应用与项目库」查看");
   };
 
   return (
